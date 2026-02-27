@@ -1,0 +1,23 @@
+{
+  "name": "rckangaroo-sass-kernels",
+  "version": "v4",
+  "architectures": [
+    {
+      "arch": "sm89",
+      "cubin": "sm89/rckangaroo_kernels.cubin",
+      "kernels": ["KernelA", "KernelB", "KernelC", "KernelGen"],
+      "constant_symbols": ["jmp2_table"]
+    },
+    {
+      "arch": "sm120",
+      "cubin": "sm120/rckangaroo_kernels.cubin",
+      "kernels": ["KernelA", "KernelB", "KernelC", "KernelGen"],
+      "constant_symbols": ["jmp2_table"]
+    }
+  ],
+  "notes": [
+    "Place architecture-specific cubins in the paths listed above.",
+    "In auto mode, runtime falls back to CUDA kernels when cubin is absent or incompatible.",
+    "Set RCK_SASS_DIR to override the base sass directory at runtime."
+  ]
+}
