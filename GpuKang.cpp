@@ -128,6 +128,20 @@ static bool IsEnvSet(const char* name)
 	return value && value[0];
 }
 
+// Shipped SASS cubins are built with fixed group geometry per architecture.
+// Host launch geometry must match, otherwise only a subset of kangaroos run
+// and exported DP type distribution becomes invalid.
+static u32 DefaultSassGroupCnt(bool isOldGpu, int smMajor, int smMinor)
+{
+	if (isOldGpu)
+		return PNT_GROUP_OLD_GPU;
+	if ((smMajor == 12) && (smMinor == 0))
+		return 16;
+	if ((smMajor == 8) && (smMinor == 9))
+		return 24;
+	return PNT_GROUP_NEW_GPU;
+}
+
 static double MinDpsPerKangTargetByRange(int rangeBits)
 {
 	if (rangeBits <= 80)
@@ -198,9 +212,7 @@ void RCGpuKang::SetBackendError(const char* fmt, ...)
 void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt)
 {
 	blockSize = IsOldGpu ? BLOCK_SIZE_OLD_GPU : BLOCK_SIZE_NEW_GPU;
-	groupCnt = IsOldGpu ? PNT_GROUP_OLD_GPU : PNT_GROUP_NEW_GPU;
-	if (!IsOldGpu && (SmMajor >= 12))
-		groupCnt = 64;
+	groupCnt = DefaultSassGroupCnt(IsOldGpu, SmMajor, SmMinor);
 
 	// Optional env overrides for quick tuning without CLI churn.
 	int envGroupCnt = ReadEnvIntBounded("RCK_GROUP_CNT", groupCnt, 8, 64);
