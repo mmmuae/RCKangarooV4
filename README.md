@@ -16,10 +16,14 @@ Discussion thread: https://bitcointalk.org/index.php?topic=5517607
 
 <b>Linux build:</b>
 
-The Makefile auto-detects CUDA from `NVCC`, `CUDA_PATH`, `CUDA_HOME`, or `PATH` (`nvcc`).
-By default, it compiles for the GPU architectures detected by `nvidia-smi` (native targets only),
-and falls back to `nvcc --list-gpu-arch` if GPU detection is unavailable.
-You can override targets with `CUDA_ARCH_LIST` to match cloud hardware.
+This version is pure SASS at runtime:
+- no `nvcc` compile step,
+- no CUDA runtime kernel fallback,
+- prebuilt cubins are loaded through CUDA Driver API.
+
+You still need CUDA headers/libraries for host code (`cuda_runtime.h`, `libcudart`, `libcuda`).
+The Makefile auto-detects CUDA from `CUDA_PATH` or `CUDA_HOME`.
+Apple Silicon without NVIDIA/CUDA is not supported for execution.
 
 Examples:
 
@@ -31,24 +35,6 @@ make all
 CUDA_PATH=/usr/local/cuda-13.0 make all
 ```
 
-```bash
-CUDA_ARCH_LIST="120 89 86 75 61" make all
-```
-
-For faster cloud builds, compile for only the target GPU:
-
-```bash
-CUDA_ARCH_LIST="120" make all
-```
-
-For SM120-only builds, Makefile applies tuned kernel defines by default:
-`PNT_GROUP_NEW_GPU=16`, `BLOCK_SIZE_NEW_GPU=256`.
-You can disable this behavior:
-
-```bash
-CUDA_ARCH_LIST="120" SM120_TUNE_ENABLE=0 make all
-```
-
 <b>Limitations:</b>
 
 - No advanced features like networking, saving/loading DPs, etc.
@@ -56,8 +42,6 @@ CUDA_ARCH_LIST="120" SM120_TUNE_ENABLE=0 make all
 <b>Command line parameters:</b>
 
 <b>-gpu</b>		which GPUs are used, for example, "035" means that GPUs #0, #3 and #5 are used. If not specified, all available GPUs are used. 
-
-<b>-backend</b>		GPU kernel backend mode: <code>auto</code>, <code>sass</code> or <code>cuda</code>. Default is <code>auto</code> (try SASS first, fallback to CUDA if unavailable).
 
 <b>-pubkey</b>		public key to solve, both compressed and uncompressed keys are supported. If not specified, software starts in benchmark mode and solves random keys. 
 
@@ -85,15 +69,21 @@ CUDA_ARCH_LIST="120" SM120_TUNE_ENABLE=0 make all
 
 <b>-h</b>, <b>--help</b>		show CLI help.
 
-SASS backend files (optional):
+If <code>-pubkey</code> is not provided, the app runs in benchmark mode by design.
+
+SASS backend files (required):
 <code>sass/sm89/rckangaroo_kernels.cubin</code> and <code>sass/sm120/rckangaroo_kernels.cubin</code>.
 You can also set <code>RCK_SASS_DIR</code> to point to another base folder with the same structure.
+Advanced SASS runtime envs:
+<code>RCK_SASS_CUBIN</code> (direct cubin path),
+<code>RCK_SASS_VARIANT</code> (load <code>rckangaroo_kernels_&lt;variant&gt;.cubin</code> before default),
+<code>RCK_BLOCK_SIZE</code>, <code>RCK_GROUP_CNT</code>, <code>RCK_BLOCKCNT_MUL</code> for launch profile tuning.
 
-Benchmark/SASS workflow scripts:
-<code>scripts/bench_seq.sh</code> and <code>scripts/sass_kernelA_workflow_sm120.sh</code>.
+Benchmark script:
+<code>scripts/bench_seq.sh</code> and <code>scripts/run_main.sh</code>.
 Examples:
-<code>./scripts/bench_seq.sh cuda 78 16 12 3 ./rckangaroo</code>,
-<code>SM120_DEFS="-DPNT_GROUP_NEW_GPU=16 -DBLOCK_SIZE_NEW_GPU=256" SM120_DLCM=ca ./scripts/sass_kernelA_workflow_sm120.sh ./sass_work/sm120</code>.
+<code>./scripts/bench_seq.sh 78 16 12 3 ./rckangaroo</code>,
+<code>./scripts/run_main.sh 03... 1000000000000000000000 84 16 ./rckangaroo</code>.
 
 Compatibility aliases:
 <code>-dp-export</code> -> <code>-dpf-mode</code>,
@@ -109,6 +99,10 @@ When public key is solved, software displays it and also writes it to "RESULTS.T
 Sample command line for puzzle #85:
 
 RCKangaroo.exe -dp 16 -range 84 -start 1000000000000000000000 -pubkey 0329c4574a4fd8c810b7e42a4b398882b381bcd85e40c6883712912d167c83e73a
+
+Equivalent Linux invocation:
+
+./rckangaroo -dp 16 -range 84 -start 1000000000000000000000 -pubkey 0329c4574a4fd8c810b7e42a4b398882b381bcd85e40c6883712912d167c83e73a
 
 Sample command to generate tames:
 

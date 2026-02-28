@@ -9,31 +9,15 @@
 #include <cstdio>
 #include <cstring>
 #include <iostream>
+#include <vector>
 #include "cuda_runtime.h"
 #include "cuda.h"
 
 #include "GpuKang.h"
 
-cudaError_t cuSetGpuParams(TKparams Kparams, u64* _jmp2_table);
-void CallGpuKernelGen(TKparams Kparams);
-void CallGpuKernelABC(TKparams Kparams);
 void AddPointsToList(u32* data, int cnt, u64 ops_cnt);
 extern bool gGenMode; //tames generation mode
 extern u32 gDpExportMode;
-extern u32 gKernelBackendMode;
-
-static const char* BackendModeName(u32 mode)
-{
-	switch (mode)
-	{
-	case GPU_BACKEND_SASS:
-		return "sass";
-	case GPU_BACKEND_CUDA:
-		return "cuda";
-	default:
-		return "auto";
-	}
-}
 
 static bool FileExists(const char* path)
 {
@@ -42,6 +26,20 @@ static bool FileExists(const char* path)
 		return false;
 	fclose(fp);
 	return true;
+}
+
+static bool TryBuildCubinPath(const char* base_dir, const char* arch_tag, const char* variant, char* out_path, size_t out_size)
+{
+	if (!base_dir || !base_dir[0] || !arch_tag || !arch_tag[0] || !out_path || !out_size)
+		return false;
+	if (variant && variant[0])
+	{
+		snprintf(out_path, out_size, "%s/%s/rckangaroo_kernels_%s.cubin", base_dir, arch_tag, variant);
+		if (FileExists(out_path))
+			return true;
+	}
+	snprintf(out_path, out_size, "%s/%s/rckangaroo_kernels.cubin", base_dir, arch_tag);
+	return FileExists(out_path);
 }
 
 static bool GetSassArchTag(int major, int minor, char* arch_tag, size_t arch_tag_size)
@@ -72,16 +70,22 @@ static bool BuildSassCubinPath(int major, int minor, char* out_path, size_t out_
 	if (!GetSassArchTag(major, minor, arch_tag, sizeof(arch_tag)))
 		return false;
 
-	const char* env_dir = getenv("RCK_SASS_DIR");
-	if (env_dir && env_dir[0])
+	const char* direct_cubin = getenv("RCK_SASS_CUBIN");
+	if (direct_cubin && direct_cubin[0])
 	{
-		snprintf(out_path, out_size, "%s/%s/rckangaroo_kernels.cubin", env_dir, arch_tag);
-		if (FileExists(out_path))
-			return true;
+		snprintf(out_path, out_size, "%s", direct_cubin);
+		return FileExists(out_path);
 	}
 
-	snprintf(out_path, out_size, "sass/%s/rckangaroo_kernels.cubin", arch_tag);
-	return FileExists(out_path);
+	const char* variant = getenv("RCK_SASS_VARIANT");
+
+	const char* env_dir = getenv("RCK_SASS_DIR");
+	if (TryBuildCubinPath(env_dir, arch_tag, variant, out_path, out_size))
+		return true;
+	if (TryBuildCubinPath("sass", arch_tag, variant, out_path, out_size))
+		return true;
+
+	return false;
 }
 
 static void FormatCuError(CUresult rc, char* out_buf, size_t out_size)
@@ -100,11 +104,25 @@ static void FormatCuError(CUresult rc, char* out_buf, size_t out_size)
 	snprintf(out_buf, out_size, "%s (%s)", err_name, err_text);
 }
 
+static int ReadEnvIntBounded(const char* name, int fallback, int min_val, int max_val)
+{
+	const char* value = getenv(name);
+	if (!value || !value[0])
+		return fallback;
+	char* end_ptr = nullptr;
+	long parsed = strtol(value, &end_ptr, 10);
+	if (!end_ptr || (*end_ptr != 0))
+		return fallback;
+	if (parsed < min_val)
+		return fallback;
+	if (parsed > max_val)
+		return fallback;
+	return (int)parsed;
+}
+
 int RCGpuKang::CalcKangCnt()
 {
-	Kparams.BlockCnt = mpCnt;
-	Kparams.BlockSize = IsOldGpu ? 512 : 256;
-	Kparams.GroupCnt = IsOldGpu ? 64 : 24;
+	ResolveLaunchConfig(Kparams.BlockCnt, Kparams.BlockSize, Kparams.GroupCnt);
 	return Kparams.BlockSize* Kparams.GroupCnt* Kparams.BlockCnt;
 }
 
@@ -120,6 +138,27 @@ void RCGpuKang::SetBackendError(const char* fmt, ...)
 	vsnprintf(BackendError, sizeof(BackendError), fmt, args);
 	va_end(args);
 	BackendError[sizeof(BackendError) - 1] = 0;
+}
+
+void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt)
+{
+	blockSize = IsOldGpu ? BLOCK_SIZE_OLD_GPU : BLOCK_SIZE_NEW_GPU;
+	groupCnt = IsOldGpu ? PNT_GROUP_OLD_GPU : PNT_GROUP_NEW_GPU;
+	if (!IsOldGpu && (SmMajor >= 12))
+		groupCnt = 16;
+
+	// Optional env overrides for quick tuning without CLI churn.
+	int envBlockSize = ReadEnvIntBounded("RCK_BLOCK_SIZE", blockSize, 128, 512);
+	if ((envBlockSize == 128) || (envBlockSize == 256) || (envBlockSize == 512))
+		blockSize = envBlockSize;
+	int envGroupCnt = ReadEnvIntBounded("RCK_GROUP_CNT", groupCnt, 8, 64);
+	envGroupCnt = (envGroupCnt / 8) * 8;
+	if (envGroupCnt < 8)
+		envGroupCnt = 8;
+	groupCnt = envGroupCnt;
+
+	int blockCntMul = ReadEnvIntBounded("RCK_BLOCKCNT_MUL", 1, 1, 4);
+	blockCnt = mpCnt * blockCntMul;
 }
 
 bool RCGpuKang::InitSassBackend(const u64* jmp2_table)
@@ -149,7 +188,7 @@ bool RCGpuKang::InitSassBackend(const u64* jmp2_table)
 	char cubin_path[512];
 	if (!BuildSassCubinPath(dev_prop.major, dev_prop.minor, cubin_path, sizeof(cubin_path)))
 	{
-		SetBackendError("no cubin for sm%d%d in ./sass or RCK_SASS_DIR", dev_prop.major, dev_prop.minor);
+		SetBackendError("no SASS cubin for sm%d%d (searched RCK_SASS_CUBIN, RCK_SASS_DIR, ./sass)", dev_prop.major, dev_prop.minor);
 		return false;
 	}
 
@@ -249,6 +288,30 @@ bool RCGpuKang::InitSassBackend(const u64* jmp2_table)
 		return false;
 	}
 
+	// Favor shared memory when hardware supports carveout tuning.
+	const int shared_carveout = 100;
+	CUresult carve_rc = cuFuncSetAttribute(SassKernelA, CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, shared_carveout);
+	if (carve_rc != CUDA_SUCCESS)
+	{
+		char errbuf[256];
+		FormatCuError(carve_rc, errbuf, sizeof(errbuf));
+		printf("GPU %d: warning: KernelA shared carveout hint failed: %s\r\n", CudaIndex, errbuf);
+	}
+	carve_rc = cuFuncSetAttribute(SassKernelB, CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, shared_carveout);
+	if (carve_rc != CUDA_SUCCESS)
+	{
+		char errbuf[256];
+		FormatCuError(carve_rc, errbuf, sizeof(errbuf));
+		printf("GPU %d: warning: KernelB shared carveout hint failed: %s\r\n", CudaIndex, errbuf);
+	}
+	carve_rc = cuFuncSetAttribute(SassKernelC, CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, shared_carveout);
+	if (carve_rc != CUDA_SUCCESS)
+	{
+		char errbuf[256];
+		FormatCuError(carve_rc, errbuf, sizeof(errbuf));
+		printf("GPU %d: warning: KernelC shared carveout hint failed: %s\r\n", CudaIndex, errbuf);
+	}
+
 	CUdeviceptr jmp2_sym = 0;
 	size_t jmp2_sym_size = 0;
 	const char* global_names[] = { "jmp2_table", "_ZL10jmp2_table" };
@@ -293,30 +356,6 @@ bool RCGpuKang::InitSassBackend(const u64* jmp2_table)
 	return true;
 }
 
-bool RCGpuKang::InitBackend(const u64* jmp2_table)
-{
-	ActiveBackend = GPU_BACKEND_CUDA;
-	SetBackendError(nullptr);
-	LoadedSassPath[0] = 0;
-
-	if (gKernelBackendMode == GPU_BACKEND_CUDA)
-		return true;
-
-	bool sass_ready = InitSassBackend(jmp2_table);
-	if (sass_ready)
-	{
-		ActiveBackend = GPU_BACKEND_SASS;
-		return true;
-	}
-
-	if (gKernelBackendMode == GPU_BACKEND_SASS)
-		return false;
-
-	// auto mode fallback path
-	printf("GPU %d: SASS backend unavailable (%s), fallback to CUDA runtime kernels.\r\n", CudaIndex, BackendError[0] ? BackendError : "unknown");
-	return true;
-}
-
 void RCGpuKang::ReleaseBackend()
 {
 	if (SassModule)
@@ -332,89 +371,77 @@ void RCGpuKang::ReleaseBackend()
 
 cudaError_t RCGpuKang::LaunchKernelGen()
 {
-	if (ActiveBackend == GPU_BACKEND_SASS)
+	void* args[] = { &Kparams };
+	CUresult cu_err = cuLaunchKernel(
+		SassKernelGen,
+		Kparams.BlockCnt, 1, 1,
+		Kparams.BlockSize, 1, 1,
+		0,
+		(CUstream)ExecStream,
+		args,
+		0);
+	if (cu_err != CUDA_SUCCESS)
 	{
-		void* args[] = { &Kparams };
-		CUresult cu_err = cuLaunchKernel(
-			SassKernelGen,
-			Kparams.BlockCnt, 1, 1,
-			Kparams.BlockSize, 1, 1,
-			0,
-			0,
-			args,
-			0);
-		if (cu_err != CUDA_SUCCESS)
-		{
-			char errbuf[256];
-			FormatCuError(cu_err, errbuf, sizeof(errbuf));
-			printf("GPU %d, SASS KernelGen launch failed: %s\r\n", CudaIndex, errbuf);
-			return cudaErrorUnknown;
-		}
-		return cudaSuccess;
+		char errbuf[256];
+		FormatCuError(cu_err, errbuf, sizeof(errbuf));
+		printf("GPU %d, SASS KernelGen launch failed: %s\r\n", CudaIndex, errbuf);
+		return cudaErrorUnknown;
 	}
-
-	CallGpuKernelGen(Kparams);
-	return cudaGetLastError();
+	return cudaSuccess;
 }
 
 cudaError_t RCGpuKang::LaunchKernelABC()
 {
-	if (ActiveBackend == GPU_BACKEND_SASS)
+	void* args[] = { &Kparams };
+	CUresult cu_err = cuLaunchKernel(
+		SassKernelA,
+		Kparams.BlockCnt, 1, 1,
+		Kparams.BlockSize, 1, 1,
+		Kparams.KernelA_LDS_Size,
+		(CUstream)ExecStream,
+		args,
+		0);
+	if (cu_err != CUDA_SUCCESS)
 	{
-		void* args[] = { &Kparams };
-		CUresult cu_err = cuLaunchKernel(
-			SassKernelA,
-			Kparams.BlockCnt, 1, 1,
-			Kparams.BlockSize, 1, 1,
-			Kparams.KernelA_LDS_Size,
-			0,
-			args,
-			0);
-		if (cu_err != CUDA_SUCCESS)
-		{
-			char errbuf[256];
-			FormatCuError(cu_err, errbuf, sizeof(errbuf));
-			printf("GPU %d, SASS KernelA launch failed: %s\r\n", CudaIndex, errbuf);
-			return cudaErrorUnknown;
-		}
-
-		cu_err = cuLaunchKernel(
-			SassKernelB,
-			Kparams.BlockCnt, 1, 1,
-			Kparams.BlockSize, 1, 1,
-			Kparams.KernelB_LDS_Size,
-			0,
-			args,
-			0);
-		if (cu_err != CUDA_SUCCESS)
-		{
-			char errbuf[256];
-			FormatCuError(cu_err, errbuf, sizeof(errbuf));
-			printf("GPU %d, SASS KernelB launch failed: %s\r\n", CudaIndex, errbuf);
-			return cudaErrorUnknown;
-		}
-
-		cu_err = cuLaunchKernel(
-			SassKernelC,
-			Kparams.BlockCnt, 1, 1,
-			Kparams.BlockSize, 1, 1,
-			Kparams.KernelC_LDS_Size,
-			0,
-			args,
-			0);
-		if (cu_err != CUDA_SUCCESS)
-		{
-			char errbuf[256];
-			FormatCuError(cu_err, errbuf, sizeof(errbuf));
-			printf("GPU %d, SASS KernelC launch failed: %s\r\n", CudaIndex, errbuf);
-			return cudaErrorUnknown;
-		}
-
-		return cudaSuccess;
+		char errbuf[256];
+		FormatCuError(cu_err, errbuf, sizeof(errbuf));
+		printf("GPU %d, SASS KernelA launch failed: %s\r\n", CudaIndex, errbuf);
+		return cudaErrorUnknown;
 	}
 
-	CallGpuKernelABC(Kparams);
-	return cudaGetLastError();
+	cu_err = cuLaunchKernel(
+		SassKernelB,
+		Kparams.BlockCnt, 1, 1,
+		Kparams.BlockSize, 1, 1,
+		Kparams.KernelB_LDS_Size,
+		(CUstream)ExecStream,
+		args,
+		0);
+	if (cu_err != CUDA_SUCCESS)
+	{
+		char errbuf[256];
+		FormatCuError(cu_err, errbuf, sizeof(errbuf));
+		printf("GPU %d, SASS KernelB launch failed: %s\r\n", CudaIndex, errbuf);
+		return cudaErrorUnknown;
+	}
+
+	cu_err = cuLaunchKernel(
+		SassKernelC,
+		Kparams.BlockCnt, 1, 1,
+		Kparams.BlockSize, 1, 1,
+		Kparams.KernelC_LDS_Size,
+		(CUstream)ExecStream,
+		args,
+		0);
+	if (cu_err != CUDA_SUCCESS)
+	{
+		char errbuf[256];
+		FormatCuError(cu_err, errbuf, sizeof(errbuf));
+		printf("GPU %d, SASS KernelC launch failed: %s\r\n", CudaIndex, errbuf);
+		return cudaErrorUnknown;
+	}
+
+	return cudaSuccess;
 }
 
 //executes in main thread
@@ -429,10 +456,15 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	StopFlag = false;
 	Failed = false;
 	u64 total_mem = 0;
+	memset(&Kparams, 0, sizeof(Kparams));
 	memset(dbg, 0, sizeof(dbg));
 	memset(SpeedStats, 0, sizeof(SpeedStats));
 	cur_stats_ind = 0;
-	ActiveBackend = GPU_BACKEND_CUDA;
+	RndPnts = nullptr;
+	DPs_out = nullptr;
+	ExecStream = nullptr;
+	DpCountHost = 0;
+	DpBufferPinned = false;
 	SassModule = nullptr;
 	SassKernelA = nullptr;
 	SassKernelB = nullptr;
@@ -445,10 +477,14 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	err = cudaSetDevice(CudaIndex);
 	if (err != cudaSuccess)
 		return false;
+	err = cudaStreamCreateWithFlags(&ExecStream, cudaStreamNonBlocking);
+	if (err != cudaSuccess)
+	{
+		printf("GPU %d, cudaStreamCreateWithFlags failed: %s\n", CudaIndex, cudaGetErrorString(err));
+		return false;
+	}
 
-	Kparams.BlockCnt = mpCnt;
-	Kparams.BlockSize = IsOldGpu ? BLOCK_SIZE_OLD_GPU : BLOCK_SIZE_NEW_GPU;
-	Kparams.GroupCnt = IsOldGpu ? PNT_GROUP_OLD_GPU : PNT_GROUP_NEW_GPU;
+	ResolveLaunchConfig(Kparams.BlockCnt, Kparams.BlockSize, Kparams.GroupCnt);
 	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 	Kparams.KangCnt = KangCnt;
 	Kparams.DP = DP;
@@ -483,6 +519,11 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		if (size > persistingL2CacheMaxSize)
 			size = persistingL2CacheMaxSize;
 		err = cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, size); // set max allowed size for L2
+		if (err != cudaSuccess)
+		{
+			printf("GPU %d, cudaDeviceSetLimit failed: %s\n", CudaIndex, cudaGetErrorString(err));
+			return false;
+		}
 		//persisting for L2
 		cudaStreamAttrValue stream_attribute;                                                   
 		stream_attribute.accessPolicyWindow.base_ptr = Kparams.L2;
@@ -490,7 +531,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		stream_attribute.accessPolicyWindow.hitRatio = 1.0;                                     
 		stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;             
 		stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;  	
-		err = cudaStreamSetAttribute(NULL, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
+		err = cudaStreamSetAttribute(ExecStream, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
 		if (err != cudaSuccess)
 		{
 			printf("GPU %d, cudaStreamSetAttribute failed: %s\n", CudaIndex, cudaGetErrorString(err));
@@ -601,80 +642,83 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	DPs_out = (u32*)malloc(MAX_DP_CNT * GPU_DP_SIZE);
+	size_t host_out_bytes = MAX_DP_CNT * GPU_DP_SIZE;
+	err = cudaMallocHost((void**)&DPs_out, host_out_bytes);
+	if (err == cudaSuccess)
+	{
+		DpBufferPinned = true;
+	}
+	else
+	{
+		DPs_out = (u32*)malloc(host_out_bytes);
+		DpBufferPinned = false;
+		if (!DPs_out)
+		{
+			printf("GPU %d, host DP buffer allocation failed\n", CudaIndex);
+			return false;
+		}
+	}
 
 //jmp1
-	u64* buf = (u64*)malloc(JMP_CNT * 96);
+	std::vector<u64> jmp_buf(JMP_CNT * 12);
 	for (int i = 0; i < JMP_CNT; i++)
 	{
-		memcpy(buf + i * 12, EcJumps1[i].p.x.data, 32);
-		memcpy(buf + i * 12 + 4, EcJumps1[i].p.y.data, 32);
-		memcpy(buf + i * 12 + 8, EcJumps1[i].dist.data, 32);
+		memcpy(jmp_buf.data() + i * 12, EcJumps1[i].p.x.data, 32);
+		memcpy(jmp_buf.data() + i * 12 + 4, EcJumps1[i].p.y.data, 32);
+		memcpy(jmp_buf.data() + i * 12 + 8, EcJumps1[i].dist.data, 32);
 	}
-	err = cudaMemcpy(Kparams.Jumps1, buf, JMP_CNT * 96, cudaMemcpyHostToDevice);
+	err = cudaMemcpy(Kparams.Jumps1, jmp_buf.data(), JMP_CNT * 96, cudaMemcpyHostToDevice);
 	if (err != cudaSuccess)
 	{
 		printf("GPU %d, cudaMemcpy Jumps1 failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
-	free(buf);
 //jmp2
-	buf = (u64*)malloc(JMP_CNT * 96);
-	u64* jmp2_table = (u64*)malloc(JMP_CNT * 64);
+	std::vector<u64> jmp2_buf(JMP_CNT * 12);
+	std::vector<u64> jmp2_table(JMP_CNT * 8);
 	for (int i = 0; i < JMP_CNT; i++)
 	{
-		memcpy(buf + i * 12, EcJumps2[i].p.x.data, 32);
-		memcpy(jmp2_table + i * 8, EcJumps2[i].p.x.data, 32);
-		memcpy(buf + i * 12 + 4, EcJumps2[i].p.y.data, 32);
-		memcpy(jmp2_table + i * 8 + 4, EcJumps2[i].p.y.data, 32);
-		memcpy(buf + i * 12 + 8, EcJumps2[i].dist.data, 32);
+		memcpy(jmp2_buf.data() + i * 12, EcJumps2[i].p.x.data, 32);
+		memcpy(jmp2_table.data() + i * 8, EcJumps2[i].p.x.data, 32);
+		memcpy(jmp2_buf.data() + i * 12 + 4, EcJumps2[i].p.y.data, 32);
+		memcpy(jmp2_table.data() + i * 8 + 4, EcJumps2[i].p.y.data, 32);
+		memcpy(jmp2_buf.data() + i * 12 + 8, EcJumps2[i].dist.data, 32);
 	}
-	err = cudaMemcpy(Kparams.Jumps2, buf, JMP_CNT * 96, cudaMemcpyHostToDevice);
+	err = cudaMemcpy(Kparams.Jumps2, jmp2_buf.data(), JMP_CNT * 96, cudaMemcpyHostToDevice);
 	if (err != cudaSuccess)
 	{
 		printf("GPU %d, cudaMemcpy Jumps2 failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
-	free(buf);
 
-	if (!InitBackend(jmp2_table))
+	if (!InitSassBackend(jmp2_table.data()))
 	{
-		free(jmp2_table);
-		printf("GPU %d, backend init failed (requested: %s): %s\r\n", CudaIndex, BackendModeName(gKernelBackendMode), BackendError[0] ? BackendError : "unknown");
+		printf("GPU %d, SASS backend init failed: %s\r\n", CudaIndex, BackendError[0] ? BackendError : "unknown");
 		return false;
 	}
-
-	if (ActiveBackend == GPU_BACKEND_CUDA)
-	{
-		err = cuSetGpuParams(Kparams, jmp2_table);
-		if (err != cudaSuccess)
-		{
-			free(jmp2_table);
-			printf("GPU %d, cuSetGpuParams failed: %s!\r\n", CudaIndex, cudaGetErrorString(err));
-			return false;
-		}
-	}
-	free(jmp2_table);
 //jmp3
-	buf = (u64*)malloc(JMP_CNT * 96);
+	std::vector<u64> jmp3_buf(JMP_CNT * 12);
 	for (int i = 0; i < JMP_CNT; i++)
 	{
-		memcpy(buf + i * 12, EcJumps3[i].p.x.data, 32);
-		memcpy(buf + i * 12 + 4, EcJumps3[i].p.y.data, 32);
-		memcpy(buf + i * 12 + 8, EcJumps3[i].dist.data, 32);
+		memcpy(jmp3_buf.data() + i * 12, EcJumps3[i].p.x.data, 32);
+		memcpy(jmp3_buf.data() + i * 12 + 4, EcJumps3[i].p.y.data, 32);
+		memcpy(jmp3_buf.data() + i * 12 + 8, EcJumps3[i].dist.data, 32);
 	}
-	err = cudaMemcpy(Kparams.Jumps3, buf, JMP_CNT * 96, cudaMemcpyHostToDevice);
+	err = cudaMemcpy(Kparams.Jumps3, jmp3_buf.data(), JMP_CNT * 96, cudaMemcpyHostToDevice);
 	if (err != cudaSuccess)
 	{
 		printf("GPU %d, cudaMemcpy Jumps3 failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
-	free(buf);
 
-	if (ActiveBackend == GPU_BACKEND_SASS)
-		printf("GPU %d: backend=sass, cubin=%s\r\n", CudaIndex, LoadedSassPath);
-	else
-		printf("GPU %d: backend=cuda\r\n", CudaIndex);
+	printf("GPU %d: backend=sass, cubin=%s\r\n", CudaIndex, LoadedSassPath);
+	printf("GPU %d: launch profile blocks=%u block_size=%u groups=%u (SM %d.%d)\r\n",
+		CudaIndex,
+		Kparams.BlockCnt,
+		Kparams.BlockSize,
+		Kparams.GroupCnt,
+		SmMajor,
+		SmMinor);
 
 	printf("GPU %d: allocated %llu MB, %d kangaroos. OldGpuMode: %s\r\n", CudaIndex, total_mem / (1024 * 1024), KangCnt, IsOldGpu ? "Yes" : "No");
 	return true;
@@ -682,9 +726,22 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 
 void RCGpuKang::Release()
 {
+	if (ExecStream)
+		cudaStreamSynchronize(ExecStream);
 	ReleaseBackend();
-	free(RndPnts);
-	free(DPs_out);
+	if (RndPnts)
+	{
+		free(RndPnts);
+		RndPnts = nullptr;
+	}
+	if (DPs_out)
+	{
+		if (DpBufferPinned)
+			cudaFreeHost(DPs_out);
+		else
+			free(DPs_out);
+		DPs_out = nullptr;
+	}
 	cudaFree(Kparams.LoopedKangs);
 	cudaFree(Kparams.dbg_buf);
 	cudaFree(Kparams.LoopTable);
@@ -699,6 +756,14 @@ void RCGpuKang::Release()
 	cudaFree(Kparams.DPs_out);
 	if (!IsOldGpu)
 		cudaFree(Kparams.L2);
+	if (ExecStream)
+	{
+		cudaStreamDestroy(ExecStream);
+		ExecStream = nullptr;
+	}
+	DpBufferPinned = false;
+	DpCountHost = 0;
+	memset(&Kparams, 0, sizeof(Kparams));
 }
 
 void RCGpuKang::Stop()
@@ -753,6 +818,11 @@ bool RCGpuKang::Start()
 	PntB.y.NegModP();
 
 	RndPnts = (TPointPriv*)malloc(KangCnt * 96);
+	if (!RndPnts)
+	{
+		printf("GPU %d, host kangaroo buffer allocation failed\n", CudaIndex);
+		return false;
+	}
 	GenerateRndDistances();
 /* 
 	//we can calc start points on CPU
@@ -816,7 +886,7 @@ bool RCGpuKang::Start()
 		}
 	}
 	//copy to gpu
-	err = cudaMemcpy(Kparams.Kangs, RndPnts, KangCnt * 96, cudaMemcpyHostToDevice);
+	err = cudaMemcpyAsync(Kparams.Kangs, RndPnts, KangCnt * 96, cudaMemcpyHostToDevice, ExecStream);
 	if (err != cudaSuccess)
 	{
 		printf("GPU %d, cudaMemcpy failed: %s\n", CudaIndex, cudaGetErrorString(err));
@@ -829,11 +899,14 @@ bool RCGpuKang::Start()
 		return false;
 	}
 
-	err = cudaMemset(Kparams.L1S2, 0, mpCnt * Kparams.BlockSize * 8);
+	err = cudaMemsetAsync(Kparams.L1S2, 0, mpCnt * Kparams.BlockSize * 8, ExecStream);
 	if (err != cudaSuccess)
 		return false;
-	cudaMemset(Kparams.dbg_buf, 0, 1024);
-	cudaMemset(Kparams.LoopTable, 0, KangCnt * MD_LEN * sizeof(u64));
+	cudaMemsetAsync(Kparams.dbg_buf, 0, 1024, ExecStream);
+	cudaMemsetAsync(Kparams.LoopTable, 0, KangCnt * MD_LEN * sizeof(u64), ExecStream);
+	err = cudaStreamSynchronize(ExecStream);
+	if (err != cudaSuccess)
+		return false;
 	return true;
 }
 
@@ -885,7 +958,7 @@ void RCGpuKang::Execute()
 
 	if (!Start())
 	{
-		ReleaseBackend();
+		Release();
 		gTotalErrors++;
 		return;
 	}
@@ -896,9 +969,24 @@ void RCGpuKang::Execute()
 	while (!StopFlag)
 	{
 		u64 t1 = GetTickCount64();
-		cudaMemset(Kparams.DPs_out, 0, 4);
-		cudaMemset(Kparams.DPTable, 0, KangCnt * sizeof(u32));
-		cudaMemset(Kparams.LoopedKangs, 0, 8);
+		err = cudaMemsetAsync(Kparams.DPs_out, 0, 4, ExecStream);
+		if (err != cudaSuccess)
+		{
+			gTotalErrors++;
+			break;
+		}
+		err = cudaMemsetAsync(Kparams.DPTable, 0, KangCnt * sizeof(u32), ExecStream);
+		if (err != cudaSuccess)
+		{
+			gTotalErrors++;
+			break;
+		}
+		err = cudaMemsetAsync(Kparams.LoopedKangs, 0, 8, ExecStream);
+		if (err != cudaSuccess)
+		{
+			gTotalErrors++;
+			break;
+		}
 		err = LaunchKernelABC();
 		if (err != cudaSuccess)
 		{
@@ -906,14 +994,21 @@ void RCGpuKang::Execute()
 			gTotalErrors++;
 			break;
 		}
-		int cnt;
-		err = cudaMemcpy(&cnt, Kparams.DPs_out, 4, cudaMemcpyDeviceToHost);
+		err = cudaMemcpyAsync(&DpCountHost, Kparams.DPs_out, 4, cudaMemcpyDeviceToHost, ExecStream);
 		if (err != cudaSuccess)
 		{
-			printf("GPU %d, CallGpuKernel failed: %s\r\n", CudaIndex, cudaGetErrorString(err));
+			printf("GPU %d, cudaMemcpyAsync(dp_count) failed: %s\r\n", CudaIndex, cudaGetErrorString(err));
 			gTotalErrors++;
 			break;
 		}
+		err = cudaStreamSynchronize(ExecStream);
+		if (err != cudaSuccess)
+		{
+			printf("GPU %d, cudaStreamSynchronize failed: %s\r\n", CudaIndex, cudaGetErrorString(err));
+			gTotalErrors++;
+			break;
+		}
+		int cnt = (int)DpCountHost;
 		
 		if (cnt >= MAX_DP_CNT)
 		{
@@ -924,7 +1019,13 @@ void RCGpuKang::Execute()
 
 		if (cnt)
 		{
-			err = cudaMemcpy(DPs_out, Kparams.DPs_out + 4, cnt * GPU_DP_SIZE, cudaMemcpyDeviceToHost);
+			err = cudaMemcpyAsync(DPs_out, Kparams.DPs_out + 4, cnt * GPU_DP_SIZE, cudaMemcpyDeviceToHost, ExecStream);
+			if (err != cudaSuccess)
+			{
+				gTotalErrors++;
+				break;
+			}
+			err = cudaStreamSynchronize(ExecStream);
 			if (err != cudaSuccess)
 			{
 				gTotalErrors++;
@@ -933,12 +1034,14 @@ void RCGpuKang::Execute()
 			AddPointsToList(DPs_out, cnt, (u64)KangCnt * STEP_CNT);
 		}
 
+#ifdef DEBUG_MODE
 		//dbg
-		cudaMemcpy(dbg, Kparams.dbg_buf, 1024, cudaMemcpyDeviceToHost);
-
-		u32 lcnt;
-		cudaMemcpy(&lcnt, Kparams.LoopedKangs, 4, cudaMemcpyDeviceToHost);
+		cudaMemcpyAsync(dbg, Kparams.dbg_buf, 1024, cudaMemcpyDeviceToHost, ExecStream);
+		u32 lcnt = 0;
+		cudaMemcpyAsync(&lcnt, Kparams.LoopedKangs, 4, cudaMemcpyDeviceToHost, ExecStream);
+		cudaStreamSynchronize(ExecStream);
 		//printf("GPU %d, Looped: %d\r\n", CudaIndex, lcnt);
+#endif
 
 		u64 t2 = GetTickCount64();
 		u64 tm = t2 - t1;

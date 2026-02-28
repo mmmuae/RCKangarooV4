@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <backend:auto|cuda|sass> [range=78] [dp=16] [duration_sec=18] [runs=3] [binary=./rckangaroo]"
-  exit 1
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  echo "Usage: $0 [range=78] [dp=16] [duration_sec=18] [runs=3] [binary=./rckangaroo]"
+  exit 0
 fi
 
-BACKEND="$1"
-RANGE="${2:-78}"
-DP="${3:-16}"
-DURATION="${4:-18}"
-RUNS="${5:-3}"
-BIN="${6:-./rckangaroo}"
+RANGE="${1:-78}"
+DP="${2:-16}"
+DURATION="${3:-18}"
+RUNS="${4:-3}"
+BIN="${5:-./rckangaroo}"
 
 if [[ ! -x "$BIN" ]]; then
   echo "error: binary not executable: $BIN"
@@ -22,13 +21,13 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 SPEED_FILE="$TMP_DIR/speeds.txt"
 
-echo "benchmark start: backend=$BACKEND range=$RANGE dp=$DP duration=${DURATION}s runs=$RUNS"
+echo "benchmark start: backend=sass-only range=$RANGE dp=$DP duration=${DURATION}s runs=$RUNS"
 
 for ((i=1; i<=RUNS; i++)); do
   LOG="$TMP_DIR/run_${i}.log"
   echo "run $i/$RUNS ..."
   set +e
-  timeout "${DURATION}s" "$BIN" -backend "$BACKEND" -range "$RANGE" -dp "$DP" >"$LOG" 2>&1
+  timeout "${DURATION}s" "$BIN" -range "$RANGE" -dp "$DP" >"$LOG" 2>&1
   RC=$?
   set -e
   if [[ $RC -ne 0 && $RC -ne 124 ]]; then
@@ -52,4 +51,4 @@ MEDIAN="$(sort -n "$SPEED_FILE" | awk '{a[NR]=$1} END {if (NR==0) {print 0} else
 MINV="$(sort -n "$SPEED_FILE" | head -n 1)"
 MAXV="$(sort -n "$SPEED_FILE" | tail -n 1)"
 
-echo "summary: backend=$BACKEND avg=${AVG} median=${MEDIAN} min=${MINV} max=${MAXV} MKeys/s"
+echo "summary: backend=sass avg=${AVG} median=${MEDIAN} min=${MINV} max=${MAXV} MKeys/s"

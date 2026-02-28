@@ -82,11 +82,6 @@ typedef char i8;
 #define DP_EXPORT_TAME		2
 #define DP_EXPORT_BOTH		3
 
-// gpu kernel backend selection
-#define GPU_BACKEND_AUTO	0
-#define GPU_BACKEND_SASS	1
-#define GPU_BACKEND_CUDA	2
-
 #define GPU_DP_SIZE			48
 #define MAX_DP_CNT			(256 * 1024)
 

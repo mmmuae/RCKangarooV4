@@ -59,7 +59,6 @@ double gMax;
 bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
 u32 gDpExportMode;
-u32 gKernelBackendMode;
 volatile bool gStopRequested;
 bool gInterruptedStop;
 char gWildSpoolDir[1024];
@@ -100,19 +99,6 @@ const char* GetDpExportModeName()
 	}
 }
 
-const char* GetBackendModeName()
-{
-	switch (gKernelBackendMode)
-	{
-	case GPU_BACKEND_SASS:
-		return "sass";
-	case GPU_BACKEND_CUDA:
-		return "cuda";
-	default:
-		return "auto";
-	}
-}
-
 bool ParseDpExportMode(const char* value, u32& outMode)
 {
 	if (!value)
@@ -137,35 +123,6 @@ bool ParseDpExportMode(const char* value, u32& outMode)
 	if (strcmp(token, "both") == 0)
 	{
 		outMode = DP_EXPORT_BOTH;
-		return true;
-	}
-	return false;
-}
-
-bool ParseBackendMode(const char* value, u32& outMode)
-{
-	if (!value)
-		return false;
-	char token[16];
-	size_t len = strlen(value);
-	if ((len == 0) || (len >= sizeof(token)))
-		return false;
-	for (size_t i = 0; i < len; i++)
-		token[i] = (char)tolower((u8)value[i]);
-	token[len] = 0;
-	if (strcmp(token, "auto") == 0)
-	{
-		outMode = GPU_BACKEND_AUTO;
-		return true;
-	}
-	if (strcmp(token, "sass") == 0)
-	{
-		outMode = GPU_BACKEND_SASS;
-		return true;
-	}
-	if (strcmp(token, "cuda") == 0)
-	{
-		outMode = GPU_BACKEND_CUDA;
 		return true;
 	}
 	return false;
@@ -220,9 +177,13 @@ void PrintUsage()
 	printf("  [-dpf-flush-records <int>] [-dpf-flush-sec <int>]\r\n\r\n");
 	printf("General options:\r\n");
 	printf("  -gpu <mask>                   Select GPUs, e.g. 035\r\n");
-	printf("  -backend <auto|sass|cuda>     GPU kernel backend selection (default: auto)\r\n");
 	printf("  -h, --help                    Show this help\r\n\r\n");
 	printf("Compatibility aliases:\r\n");
+	printf("  -pub, -pk                      Same as -pubkey\r\n");
+	printf("  -offset                        Same as -start\r\n");
+	printf("  -bits                          Same as -range\r\n");
+	printf("  -dpbits                        Same as -dp\r\n");
+	printf("  -g                             Same as -gpu\r\n");
 	printf("  -dp-export <wild|tame|both>   Same as -dpf-mode\r\n");
 	printf("  -wild-only                    Same as -dpf-mode wild\r\n");
 	printf("  -worker-id                    Same as -dpf-worker\r\n");
@@ -278,6 +239,8 @@ void InitGpus()
 
 		GpuKangs[GpuCnt] = new RCGpuKang();
 		GpuKangs[GpuCnt]->CudaIndex = i;
+		GpuKangs[GpuCnt]->SmMajor = deviceProp.major;
+		GpuKangs[GpuCnt]->SmMinor = deviceProp.minor;
 		GpuKangs[GpuCnt]->persistingL2CacheMaxSize = deviceProp.persistingL2CacheMaxSize;
 		GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
 		GpuKangs[GpuCnt]->IsOldGpu = deviceProp.l2CacheSize < 16 * 1024 * 1024;
@@ -753,7 +716,7 @@ bool ParseCommandLine(int argc, char* argv[])
 			return false;
 		}
 		else
-		if (strcmp(argument, "-gpu") == 0)
+		if ((strcmp(argument, "-gpu") == 0) || (strcmp(argument, "-g") == 0))
 		{
 			if (ci >= argc)
 			{
@@ -774,22 +737,7 @@ bool ParseCommandLine(int argc, char* argv[])
 			}
 		}
 		else
-		if (strcmp(argument, "-backend") == 0)
-		{
-			if (ci >= argc)
-			{
-				printf("error: missed value after -backend option\r\n");
-				return false;
-			}
-			if (!ParseBackendMode(argv[ci], gKernelBackendMode))
-			{
-				printf("error: invalid value for -backend option (expected: auto, sass, cuda)\r\n");
-				return false;
-			}
-			ci++;
-		}
-		else
-		if (strcmp(argument, "-dp") == 0)
+		if ((strcmp(argument, "-dp") == 0) || (strcmp(argument, "-dpbits") == 0))
 		{
 			if (ci >= argc)
 			{
@@ -806,7 +754,7 @@ bool ParseCommandLine(int argc, char* argv[])
 			gDP = val;
 		}
 		else
-		if (strcmp(argument, "-range") == 0)
+		if ((strcmp(argument, "-range") == 0) || (strcmp(argument, "-bits") == 0))
 		{
 			if (ci >= argc)
 			{
@@ -823,7 +771,7 @@ bool ParseCommandLine(int argc, char* argv[])
 			gRange = val;
 		}
 		else
-		if (strcmp(argument, "-start") == 0)
+		if ((strcmp(argument, "-start") == 0) || (strcmp(argument, "-offset") == 0))
 		{
 			if (ci >= argc)
 			{
@@ -841,7 +789,7 @@ bool ParseCommandLine(int argc, char* argv[])
 			gStartSet = true;
 		}
 		else
-		if (strcmp(argument, "-pubkey") == 0)
+		if ((strcmp(argument, "-pubkey") == 0) || (strcmp(argument, "-pub") == 0) || (strcmp(argument, "-pk") == 0))
 		{
 			if (ci >= argc)
 			{
@@ -1064,7 +1012,6 @@ int main(int argc, char* argv[])
 	gGenMode = false;
 	gIsOpsLimit = false;
 	gDpExportMode = DP_EXPORT_NONE;
-	gKernelBackendMode = GPU_BACKEND_AUTO;
 	gStopRequested = false;
 	gInterruptedStop = false;
 	gWildFlushRecords = 1000000;
@@ -1072,8 +1019,7 @@ int main(int argc, char* argv[])
 	memset(gGPUs_Mask, 1, sizeof(gGPUs_Mask));
 	if (!ParseCommandLine(argc, argv))
 		return 0;
-
-	printf("Requested GPU backend: %s\r\n", GetBackendModeName());
+	printf("GPU kernel backend: pure SASS (no CUDA runtime kernels)\r\n");
 
 	signal(SIGINT, OnSignal);
 #ifndef _WIN32
@@ -1192,7 +1138,10 @@ int main(int argc, char* argv[])
 		if (gGenMode)
 			printf("\r\nTAMES GENERATION MODE\r\n");
 		else
+		{
 			printf("\r\nBENCHMARK MODE\r\n");
+			printf("Hint: for normal solve mode use -pubkey <hex> -start <hex> -range <bits> -dp <bits>\r\n");
+		}
 		//solve points, show K
 			while (!gStopRequested)
 			{

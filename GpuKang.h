@@ -52,17 +52,19 @@ private:
 	int cur_stats_ind;
 	int SpeedStats[STATS_WND_SIZE];
 
-	u32 ActiveBackend;
+	cudaStream_t ExecStream;
 	CUmodule SassModule;
 	CUfunction SassKernelA;
 	CUfunction SassKernelB;
 	CUfunction SassKernelC;
 	CUfunction SassKernelGen;
+	u32 DpCountHost;
+	bool DpBufferPinned;
 	char BackendError[256];
 	char LoadedSassPath[512];
 
 	void GenerateRndDistances();
-	bool InitBackend(const u64* jmp2_table);
+	void ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt);
 	bool InitSassBackend(const u64* jmp2_table);
 	void ReleaseBackend();
 	cudaError_t LaunchKernelGen();
@@ -76,6 +78,8 @@ private:
 public:
 	int persistingL2CacheMaxSize;
 	int CudaIndex; //gpu index in cuda
+	int SmMajor;
+	int SmMinor;
 	int mpCnt;
 	int KangCnt;
 	bool Failed;

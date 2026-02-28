@@ -17,7 +17,9 @@
   ],
   "notes": [
     "Place architecture-specific cubins in the paths listed above.",
-    "In auto mode, runtime falls back to CUDA kernels when cubin is absent or incompatible.",
-    "Set RCK_SASS_DIR to override the base sass directory at runtime."
+    "Runtime is SASS-only and will fail if cubin is absent or incompatible.",
+    "Set RCK_SASS_DIR to override the base sass directory at runtime.",
+    "Set RCK_SASS_CUBIN to load a direct cubin path.",
+    "Set RCK_SASS_VARIANT to try rckangaroo_kernels_<variant>.cubin before default."
   ]
 }
