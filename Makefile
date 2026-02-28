@@ -21,7 +21,7 @@ CUDA_LIB_DIRS := $(CUDA_PATH)/lib64 $(CUDA_PATH)/targets/x86_64-linux/lib
 CUDA_LIB_FLAGS := $(foreach d,$(CUDA_LIB_DIRS),-L$(d))
 CUDA_RPATH_FLAGS := $(foreach d,$(CUDA_LIB_DIRS),-Wl,-rpath,$(d))
 
-CCFLAGS := -O3 -I$(CUDA_PATH)/include $(RCK_DEFS)
+CCFLAGS := -O3 -std=c++17 -I$(CUDA_PATH)/include $(RCK_DEFS)
 LDFLAGS := $(CUDA_LIB_FLAGS) $(CUDA_RPATH_FLAGS) -lcudart -lcuda -pthread
 
 CPU_SRC := RCKangaroo.cpp GpuKang.cpp Ec.cpp utils.cpp WildSpoolWriter.cpp

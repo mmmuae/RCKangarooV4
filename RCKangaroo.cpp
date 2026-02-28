@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <vector>
+#include <atomic>
 #include <signal.h>
 #include <ctype.h>
 #include <time.h>
@@ -44,7 +45,7 @@ EcInt gPrivKey;
 
 volatile u64 TotalOps;
 u32 TotalSolved;
-u32 gTotalErrors;
+std::atomic<u32> gTotalErrors(0);
 u64 PntTotalOps;
 bool IsBench;
 
@@ -406,24 +407,24 @@ void CheckNewPoints()
 				WildType = nrec.type;
 			}
 
-			bool res = Collision_SOTA(gPntToSolve, t, TameType, w, WildType, false) || Collision_SOTA(gPntToSolve, t, TameType, w, WildType, true);
-			if (!res)
-			{
-				bool w12 = ((pref->type == WILD1) && (nrec.type == WILD2)) || ((pref->type == WILD2) && (nrec.type == WILD1));
-				if (w12) //in rare cases WILD and WILD2 can collide in mirror, in this case there is no way to find K
-					;// ToLog("W1 and W2 collides in mirror");
-				else
+				bool res = Collision_SOTA(gPntToSolve, t, TameType, w, WildType, false) || Collision_SOTA(gPntToSolve, t, TameType, w, WildType, true);
+				if (!res)
 				{
-					printf("Collision Error\r\n");
-					gTotalErrors++;
+					bool w12 = ((pref->type == WILD1) && (nrec.type == WILD2)) || ((pref->type == WILD2) && (nrec.type == WILD1));
+					if (w12) //in rare cases WILD and WILD2 can collide in mirror, in this case there is no way to find K
+						;// ToLog("W1 and W2 collides in mirror");
+					else
+					{
+						printf("Collision Error\r\n");
+						gTotalErrors.fetch_add(1, std::memory_order_relaxed);
+					}
+					continue;
 				}
-				continue;
+				gSolved = true;
+				break;
 			}
-			gSolved = true;
-			break;
 		}
 	}
-}
 
 void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 {
@@ -459,11 +460,12 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 	 
 	if (IsDpExportEnabled())
 	{
+		u32 errCount = gTotalErrors.load(std::memory_order_relaxed);
 		printf(
 			"EXPORT[%s]: Speed: %d MKeys/s, Err: %d, Exported: %lluK rec, Files: %llu, Pending: %llu, Time: %llud:%02dh:%02dm\r\n",
 			GetDpExportModeName(),
 			speed,
-			gTotalErrors,
+			errCount,
 			gWildWriter.GetWrittenRecords() / 1000ull,
 			gWildWriter.GetWrittenFiles(),
 			gWildWriter.GetPendingRecords(),
@@ -473,7 +475,8 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 	}
 	else
 	{
-		printf("%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm\r\n", gGenMode ? "GEN: " : (IsBench ? "BENCH: " : "MAIN: "), speed, gTotalErrors, db.GetBlockCnt()/1000, est_dps_cnt/1000, days, hours, min, exp_days, exp_hours, exp_min);
+		u32 errCount = gTotalErrors.load(std::memory_order_relaxed);
+		printf("%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm\r\n", gGenMode ? "GEN: " : (IsBench ? "BENCH: " : "MAIN: "), speed, errCount, db.GetBlockCnt()/1000, est_dps_cnt/1000, days, hours, min, exp_days, exp_hours, exp_min);
 	}
 }
 
@@ -813,7 +816,8 @@ bool ParseCommandLine(int argc, char* argv[])
 				printf("error: missed value after -tames option\r\n");
 				return false;
 			}
-			strcpy(gTamesFileName, argv[ci]);
+			strncpy(gTamesFileName, argv[ci], sizeof(gTamesFileName) - 1);
+			gTamesFileName[sizeof(gTamesFileName) - 1] = 0;
 			ci++;
 		}
 		else
@@ -1038,7 +1042,7 @@ int main(int argc, char* argv[])
 	pPntList2 = (u8*)malloc(MAX_CNT_LIST * GPU_DP_SIZE);
 	TotalOps = 0;
 	TotalSolved = 0;
-	gTotalErrors = 0;
+	gTotalErrors.store(0, std::memory_order_relaxed);
 	IsBench = gPubKey.x.IsZero();
 
 	if (IsDpExportEnabled())
