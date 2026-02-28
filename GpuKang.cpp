@@ -128,12 +128,27 @@ static bool IsEnvSet(const char* name)
 	return value && value[0];
 }
 
+static double MinDpsPerKangTargetByRange(int rangeBits)
+{
+	if (rangeBits <= 80)
+		return 9.0;
+	if (rangeBits <= 96)
+		return 7.0;
+	if (rangeBits <= 112)
+		return 5.0;
+	if (rangeBits <= 128)
+		return 4.0;
+	if (rangeBits <= 144)
+		return 3.0;
+	return 2.0;
+}
+
 static void TuneGroupCntForMainSolve(u32& groupCnt, u32 blockCnt, u32 blockSize, int rangeBits, int dpBits, int cudaIndex)
 {
 	if ((groupCnt < 8) || (rangeBits < 32) || (dpBits < 1) || (dpBits > 60))
 		return;
 
-	const double minDpsPerKang = 8.0;
+	const double minDpsPerKang = MinDpsPerKangTargetByRange(rangeBits);
 	const double ops = 1.15 * pow(2.0, rangeBits / 2.0);
 	const double dpValue = ldexp(1.0, dpBits);
 	u32 tuned = groupCnt;
@@ -147,12 +162,13 @@ static void TuneGroupCntForMainSolve(u32& groupCnt, u32 blockCnt, u32 blockSize,
 	}
 	if (tuned != groupCnt)
 	{
-		printf("GPU %d: auto-tuned group count %u -> %u for stable collision rate (range=%d, dp=%d)\r\n",
+		printf("GPU %d: auto-tuned group count %u -> %u for stable collisions (range=%d, dp=%d, target DPs/kang>=%.1f)\r\n",
 			cudaIndex,
 			groupCnt,
 			tuned,
 			rangeBits,
-			dpBits);
+			dpBits,
+			minDpsPerKang);
 		groupCnt = tuned;
 	}
 }
