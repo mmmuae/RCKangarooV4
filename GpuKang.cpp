@@ -6,6 +6,7 @@
 
 #include <cstdarg>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -121,10 +122,47 @@ static int ReadEnvIntBounded(const char* name, int fallback, int min_val, int ma
 	return (int)parsed;
 }
 
-int RCGpuKang::CalcKangCnt()
+static bool IsEnvSet(const char* name)
+{
+	const char* value = getenv(name);
+	return value && value[0];
+}
+
+static void TuneGroupCntForMainSolve(u32& groupCnt, u32 blockCnt, u32 blockSize, int rangeBits, int dpBits, int cudaIndex)
+{
+	if ((groupCnt < 8) || (rangeBits < 32) || (dpBits < 1) || (dpBits > 60))
+		return;
+
+	const double minDpsPerKang = 8.0;
+	const double ops = 1.15 * pow(2.0, rangeBits / 2.0);
+	const double dpValue = ldexp(1.0, dpBits);
+	u32 tuned = groupCnt;
+	while (tuned > 8)
+	{
+		double kangCnt = (double)blockCnt * (double)blockSize * (double)tuned;
+		double dpsPerKang = ops / (kangCnt * dpValue);
+		if (dpsPerKang >= minDpsPerKang)
+			break;
+		tuned -= 8;
+	}
+	if (tuned != groupCnt)
+	{
+		printf("GPU %d: auto-tuned group count %u -> %u for stable collision rate (range=%d, dp=%d)\r\n",
+			cudaIndex,
+			groupCnt,
+			tuned,
+			rangeBits,
+			dpBits);
+		groupCnt = tuned;
+	}
+}
+
+int RCGpuKang::CalcKangCnt(int rangeBits, int dpBits, u32 runMode)
 {
 	ResolveLaunchConfig(Kparams.BlockCnt, Kparams.BlockSize, Kparams.GroupCnt);
-	return Kparams.BlockSize* Kparams.GroupCnt* Kparams.BlockCnt;
+	if ((runMode == KANG_MODE_MAIN) && !IsEnvSet("RCK_GROUP_CNT"))
+		TuneGroupCntForMainSolve(Kparams.GroupCnt, Kparams.BlockCnt, Kparams.BlockSize, rangeBits, dpBits, CudaIndex);
+	return Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 }
 
 void RCGpuKang::SetBackendError(const char* fmt, ...)
@@ -492,12 +530,6 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	}
 
 	ResolveLaunchConfig(Kparams.BlockCnt, Kparams.BlockSize, Kparams.GroupCnt);
-	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
-	Kparams.KangCnt = KangCnt;
-	Kparams.DP = DP;
-	Kparams.KernelA_LDS_Size = 64 * JMP_CNT + 16 * Kparams.BlockSize;
-	Kparams.KernelB_LDS_Size = 64 * JMP_CNT;
-	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
 	if (gDpExportMode == DP_EXPORT_WILD)
 		Kparams.RunMode = KANG_MODE_EXPORT_WILD;
 	else if (gDpExportMode == DP_EXPORT_TAME)
@@ -508,6 +540,15 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		Kparams.RunMode = KANG_MODE_GEN_TAME;
 	else
 		Kparams.RunMode = KANG_MODE_MAIN;
+	if ((Kparams.RunMode == KANG_MODE_MAIN) && !IsEnvSet("RCK_GROUP_CNT"))
+		TuneGroupCntForMainSolve(Kparams.GroupCnt, Kparams.BlockCnt, Kparams.BlockSize, Range, DP, CudaIndex);
+
+	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
+	Kparams.KangCnt = KangCnt;
+	Kparams.DP = DP;
+	Kparams.KernelA_LDS_Size = 64 * JMP_CNT + 16 * Kparams.BlockSize;
+	Kparams.KernelB_LDS_Size = 64 * JMP_CNT;
+	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
 
 //allocate gpu mem
 	u64 size;

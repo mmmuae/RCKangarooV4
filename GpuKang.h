@@ -85,7 +85,7 @@ public:
 	bool Failed;
 	bool IsOldGpu;
 
-	int CalcKangCnt();
+	int CalcKangCnt(int rangeBits, int dpBits, u32 runMode);
 	bool Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJumps1, EcJMP* _EcJumps2, EcJMP* _EcJumps3);
 	void Stop();
 	void Execute();

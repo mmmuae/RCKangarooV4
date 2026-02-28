@@ -511,9 +511,18 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 		printf("Max allowed number of ops: 2^%.3f, max RAM for DPs: %.3f GB\r\n", log2(MaxTotalOps), ram_max);
 	}
 
-	u64 total_kangs = GpuKangs[0]->CalcKangCnt();
+	u32 estRunMode = KANG_MODE_MAIN;
+	if (gDpExportMode == DP_EXPORT_WILD)
+		estRunMode = KANG_MODE_EXPORT_WILD;
+	else if (gDpExportMode == DP_EXPORT_TAME)
+		estRunMode = KANG_MODE_EXPORT_TAME;
+	else if (gDpExportMode == DP_EXPORT_BOTH)
+		estRunMode = KANG_MODE_EXPORT_BOTH;
+	else if (gGenMode)
+		estRunMode = KANG_MODE_GEN_TAME;
+	u64 total_kangs = GpuKangs[0]->CalcKangCnt(Range, DP, estRunMode);
 	for (int i = 1; i < GpuCnt; i++)
-		total_kangs += GpuKangs[i]->CalcKangCnt();
+		total_kangs += GpuKangs[i]->CalcKangCnt(Range, DP, estRunMode);
 	double path_single_kang = ops / total_kangs;	
 	double DPs_per_kang = path_single_kang / dp_val;
 	printf("Estimated DPs per kangaroo: %.3f.%s\r\n", DPs_per_kang, (DPs_per_kang < 5) ? " DP overhead is big, use less DP value if possible!" : "");
