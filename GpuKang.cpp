@@ -145,12 +145,9 @@ void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt
 	blockSize = IsOldGpu ? BLOCK_SIZE_OLD_GPU : BLOCK_SIZE_NEW_GPU;
 	groupCnt = IsOldGpu ? PNT_GROUP_OLD_GPU : PNT_GROUP_NEW_GPU;
 	if (!IsOldGpu && (SmMajor >= 12))
-		groupCnt = 16;
+		groupCnt = 64;
 
 	// Optional env overrides for quick tuning without CLI churn.
-	int envBlockSize = ReadEnvIntBounded("RCK_BLOCK_SIZE", blockSize, 128, 512);
-	if ((envBlockSize == 128) || (envBlockSize == 256) || (envBlockSize == 512))
-		blockSize = envBlockSize;
 	int envGroupCnt = ReadEnvIntBounded("RCK_GROUP_CNT", groupCnt, 8, 64);
 	envGroupCnt = (envGroupCnt / 8) * 8;
 	if (envGroupCnt < 8)

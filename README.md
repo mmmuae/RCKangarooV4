@@ -77,7 +77,8 @@ You can also set <code>RCK_SASS_DIR</code> to point to another base folder with 
 Advanced SASS runtime envs:
 <code>RCK_SASS_CUBIN</code> (direct cubin path),
 <code>RCK_SASS_VARIANT</code> (load <code>rckangaroo_kernels_&lt;variant&gt;.cubin</code> before default),
-<code>RCK_BLOCK_SIZE</code>, <code>RCK_GROUP_CNT</code>, <code>RCK_BLOCKCNT_MUL</code> for launch profile tuning.
+<code>RCK_GROUP_CNT</code> and <code>RCK_BLOCKCNT_MUL</code> for launch profile tuning.
+For SM120/RTX 5090, default runtime launch profile uses group count 64.
 
 Benchmark script:
 <code>scripts/bench_seq.sh</code> and <code>scripts/run_main.sh</code>.
