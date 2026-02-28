@@ -1061,14 +1061,14 @@ void RCGpuKang::Execute()
 		cur_stats_ind = (cur_stats_ind + 1) % STATS_WND_SIZE;
 
 #ifdef DEBUG_MODE
-			if ((iter % 300) == 0)
+		if ((iter % 300) == 0)
+		{
+			int corr_cnt = Dbg_CheckKangs();
+			if (corr_cnt)
 			{
-				int corr_cnt = Dbg_CheckKangs();
-				if (corr_cnt)
-				{
-					printf("DBG: GPU %d, KANGS CORRUPTED: %d\r\n", CudaIndex, corr_cnt);
-					gTotalErrors.fetch_add(1, std::memory_order_relaxed);
-				}
+				printf("DBG: GPU %d, KANGS CORRUPTED: %d\r\n", CudaIndex, corr_cnt);
+				gTotalErrors.fetch_add(1, std::memory_order_relaxed);
+			}
 			else
 				printf("DBG: GPU %d, ALL KANGS OK!\r\n", CudaIndex);
 		}
