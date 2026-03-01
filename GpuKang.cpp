@@ -45,6 +45,16 @@ static bool TryBuildCubinPath(const char* base_dir, const char* arch_tag, const 
 	return FileExists(out_path);
 }
 
+struct SassLaunchContract
+{
+	u32 block_size;
+	u32 group_cnt;
+	u32 step_cnt;
+	u32 jmp_cnt;
+	u32 gpu_dp_size;
+	u32 max_dp_cnt;
+};
+
 static bool GetSassArchTag(int major, int minor, char* arch_tag, size_t arch_tag_size)
 {
 	if (!arch_tag || !arch_tag_size)
@@ -105,6 +115,106 @@ static void FormatCuError(CUresult rc, char* out_buf, size_t out_size)
 	if (!err_text)
 		err_text = "no error text";
 	snprintf(out_buf, out_size, "%s (%s)", err_name, err_text);
+}
+
+static bool ReadModuleU32(CUmodule module, const char* symbol, u32& out_val, char* errbuf, size_t errbuf_size)
+{
+	CUdeviceptr dev_ptr = 0;
+	size_t symbol_size = 0;
+	CUresult rc = cuModuleGetGlobal(&dev_ptr, &symbol_size, module, symbol);
+	if (rc != CUDA_SUCCESS)
+	{
+		if (errbuf && errbuf_size)
+		{
+			char cuerr[128];
+			FormatCuError(rc, cuerr, sizeof(cuerr));
+			snprintf(errbuf, errbuf_size, "missing symbol %s: %s", symbol, cuerr);
+		}
+		return false;
+	}
+	if (symbol_size < sizeof(u32))
+	{
+		if (errbuf && errbuf_size)
+			snprintf(errbuf, errbuf_size, "symbol %s too small: %llu", symbol, (unsigned long long)symbol_size);
+		return false;
+	}
+	rc = cuMemcpyDtoH(&out_val, dev_ptr, sizeof(u32));
+	if (rc != CUDA_SUCCESS)
+	{
+		if (errbuf && errbuf_size)
+		{
+			char cuerr[128];
+			FormatCuError(rc, cuerr, sizeof(cuerr));
+			snprintf(errbuf, errbuf_size, "read symbol %s failed: %s", symbol, cuerr);
+		}
+		return false;
+	}
+	return true;
+}
+
+static bool ProbeSassLaunchContract(const char* cubin_path, SassLaunchContract& out, char* errbuf, size_t errbuf_size)
+{
+	memset(&out, 0, sizeof(out));
+	if (!cubin_path || !cubin_path[0])
+	{
+		if (errbuf && errbuf_size)
+			snprintf(errbuf, errbuf_size, "empty cubin path");
+		return false;
+	}
+	CUresult rc = cuInit(0);
+	if (rc != CUDA_SUCCESS)
+	{
+		if (errbuf && errbuf_size)
+		{
+			char cuerr[128];
+			FormatCuError(rc, cuerr, sizeof(cuerr));
+			snprintf(errbuf, errbuf_size, "cuInit failed: %s", cuerr);
+		}
+		return false;
+	}
+	cudaFree(0);
+	CUcontext ctx = nullptr;
+	rc = cuCtxGetCurrent(&ctx);
+	if ((rc != CUDA_SUCCESS) || !ctx)
+	{
+		if (errbuf && errbuf_size)
+		{
+			char cuerr[128];
+			FormatCuError(rc, cuerr, sizeof(cuerr));
+			snprintf(errbuf, errbuf_size, "cuCtxGetCurrent failed: %s", cuerr);
+		}
+		return false;
+	}
+
+	CUmodule module = nullptr;
+	rc = cuModuleLoad(&module, cubin_path);
+	if (rc != CUDA_SUCCESS)
+	{
+		if (errbuf && errbuf_size)
+		{
+			char cuerr[128];
+			FormatCuError(rc, cuerr, sizeof(cuerr));
+			snprintf(errbuf, errbuf_size, "cuModuleLoad(%s) failed: %s", cubin_path, cuerr);
+		}
+		return false;
+	}
+
+	char symbol_err[256];
+	bool ok =
+		ReadModuleU32(module, "rck_contract_block_size", out.block_size, symbol_err, sizeof(symbol_err)) &&
+		ReadModuleU32(module, "rck_contract_group_cnt", out.group_cnt, symbol_err, sizeof(symbol_err)) &&
+		ReadModuleU32(module, "rck_contract_step_cnt", out.step_cnt, symbol_err, sizeof(symbol_err)) &&
+		ReadModuleU32(module, "rck_contract_jmp_cnt", out.jmp_cnt, symbol_err, sizeof(symbol_err)) &&
+		ReadModuleU32(module, "rck_contract_gpu_dp_size", out.gpu_dp_size, symbol_err, sizeof(symbol_err)) &&
+		ReadModuleU32(module, "rck_contract_max_dp_cnt", out.max_dp_cnt, symbol_err, sizeof(symbol_err));
+	cuModuleUnload(module);
+	if (!ok)
+	{
+		if (errbuf && errbuf_size)
+			snprintf(errbuf, errbuf_size, "%s", symbol_err);
+		return false;
+	}
+	return true;
 }
 
 static int ReadEnvIntBounded(const char* name, int fallback, int min_val, int max_val)
@@ -228,11 +338,8 @@ static u32 DefaultGroupCntByArch(bool isOldGpu, int sm_major, int sm_minor)
 {
 	if (isOldGpu)
 		return PNT_GROUP_OLD_GPU;
-	// Hopper/Blackwell profile for pure SASS in this branch.
-	if ((sm_major >= 12) && (sm_minor >= 0))
-		return 64;
-	if ((sm_major == 8) && (sm_minor == 9))
-		return 24;
+	(void)sm_major;
+	(void)sm_minor;
 	return PNT_GROUP_NEW_GPU;
 }
 
@@ -314,6 +421,8 @@ void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt
 	LaunchContractGroupCnt = DefaultGroupCntByArch(IsOldGpu, SmMajor, SmMinor);
 	blockSize = LaunchContractBlockSize;
 	groupCnt = LaunchContractGroupCnt;
+	LaunchEnvBlockSet = false;
+	LaunchEnvGroupSet = false;
 
 	const char* variant = getenv("RCK_SASS_VARIANT");
 	u32 hinted_group = 0;
@@ -365,14 +474,14 @@ void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt
 		snprintf(LaunchConfigSource, sizeof(LaunchConfigSource), "arch_default");
 
 	// Optional env overrides for quick tuning without CLI churn.
-	bool env_group_set = IsEnvSet("RCK_GROUP_CNT");
+	LaunchEnvGroupSet = IsEnvSet("RCK_GROUP_CNT");
 	int envGroupCnt = ReadEnvIntBounded("RCK_GROUP_CNT", groupCnt, 8, 64);
 	envGroupCnt = (envGroupCnt / 8) * 8;
 	if (envGroupCnt < 8)
 		envGroupCnt = 8;
-	if (env_group_set)
+	if (LaunchEnvGroupSet)
 	{
-		if (LaunchStrictMode && (u32)envGroupCnt != LaunchContractGroupCnt)
+		if (LaunchStrictMode && LaunchGroupLocked && (u32)envGroupCnt != LaunchContractGroupCnt)
 		{
 			snprintf(
 				LaunchConfigError,
@@ -385,14 +494,14 @@ void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt
 		groupCnt = (u32)envGroupCnt;
 	}
 
-	bool env_block_set = IsEnvSet("RCK_BLOCK_SIZE");
+	LaunchEnvBlockSet = IsEnvSet("RCK_BLOCK_SIZE");
 	int envBlockSize = ReadEnvIntBounded("RCK_BLOCK_SIZE", (int)blockSize, 64, 1024);
 	envBlockSize = (envBlockSize / 32) * 32;
 	if (envBlockSize < 64)
 		envBlockSize = 64;
-	if (env_block_set)
+	if (LaunchEnvBlockSet)
 	{
-		if (LaunchStrictMode && (u32)envBlockSize != LaunchContractBlockSize)
+		if (LaunchStrictMode && LaunchGroupLocked && (u32)envBlockSize != LaunchContractBlockSize)
 		{
 			snprintf(
 				LaunchConfigError,
@@ -772,6 +881,8 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	LaunchContractGroupCnt = 0;
 	LaunchGroupLocked = false;
 	LaunchStrictMode = true;
+	LaunchEnvBlockSet = false;
+	LaunchEnvGroupSet = false;
 
 	auto FailPrepare = [&]() -> bool
 	{
@@ -809,6 +920,77 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		Kparams.RunMode = KANG_MODE_GEN_TAME;
 	else
 		Kparams.RunMode = KANG_MODE_MAIN;
+
+	// Probe compile-time contract directly from cubin and lock runtime launch
+	// geometry to avoid any host/cubin drift that corrupts DP semantics.
+	char probe_cubin_path[512];
+	if (!BuildSassCubinPath(SmMajor, SmMinor, probe_cubin_path, sizeof(probe_cubin_path)))
+	{
+		printf("GPU %d, SASS cubin is missing for this GPU/profile\r\n", CudaIndex);
+		return FailPrepare();
+	}
+	SassLaunchContract probe_contract;
+	char probe_err[256];
+	if (ProbeSassLaunchContract(probe_cubin_path, probe_contract, probe_err, sizeof(probe_err)))
+	{
+		LaunchContractBlockSize = probe_contract.block_size;
+		LaunchContractGroupCnt = probe_contract.group_cnt;
+		snprintf(LaunchConfigSource, sizeof(LaunchConfigSource), "cubin_contract:%s", PathBasename(probe_cubin_path));
+
+		if ((probe_contract.step_cnt != STEP_CNT) || (probe_contract.jmp_cnt != JMP_CNT) ||
+			(probe_contract.gpu_dp_size != GPU_DP_SIZE) || (probe_contract.max_dp_cnt != MAX_DP_CNT))
+		{
+			printf(
+				"GPU %d, cubin contract mismatch: step/jmp/dp-size/max-dp differs from host build "
+				"(cubin step=%u jmp=%u dp=%u max=%u | host step=%u jmp=%u dp=%u max=%u)\r\n",
+				CudaIndex,
+				probe_contract.step_cnt,
+				probe_contract.jmp_cnt,
+				probe_contract.gpu_dp_size,
+				probe_contract.max_dp_cnt,
+				(u32)STEP_CNT,
+				(u32)JMP_CNT,
+				(u32)GPU_DP_SIZE,
+				(u32)MAX_DP_CNT);
+			return FailPrepare();
+		}
+
+		if (LaunchStrictMode)
+		{
+			if (LaunchEnvBlockSet && (Kparams.BlockSize != probe_contract.block_size))
+			{
+				printf("GPU %d, launch profile error: RCK_BLOCK_SIZE=%u mismatches cubin block=%u\r\n",
+					CudaIndex, Kparams.BlockSize, probe_contract.block_size);
+				return FailPrepare();
+			}
+			if (LaunchEnvGroupSet && (Kparams.GroupCnt != probe_contract.group_cnt))
+			{
+				printf("GPU %d, launch profile error: RCK_GROUP_CNT=%u mismatches cubin group=%u\r\n",
+					CudaIndex, Kparams.GroupCnt, probe_contract.group_cnt);
+				return FailPrepare();
+			}
+			Kparams.BlockSize = probe_contract.block_size;
+			Kparams.GroupCnt = probe_contract.group_cnt;
+			LaunchGroupLocked = true;
+		}
+		else
+		{
+			if (!LaunchEnvBlockSet)
+				Kparams.BlockSize = probe_contract.block_size;
+			if (!LaunchEnvGroupSet)
+				Kparams.GroupCnt = probe_contract.group_cnt;
+		}
+	}
+	else if (LaunchStrictMode)
+	{
+		printf("GPU %d, launch profile error: cannot read cubin contract: %s\r\n", CudaIndex, probe_err);
+		return FailPrepare();
+	}
+	else
+	{
+		printf("GPU %d: warning: cannot read cubin contract (%s), using host launch profile\r\n", CudaIndex, probe_err);
+	}
+
 	if ((Kparams.RunMode == KANG_MODE_MAIN) && !IsEnvSet("RCK_GROUP_CNT") && !LaunchGroupLocked)
 		TuneGroupCntForMainSolve(Kparams.GroupCnt, Kparams.BlockCnt, Kparams.BlockSize, Range, DP, CudaIndex);
 

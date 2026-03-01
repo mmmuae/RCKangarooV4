@@ -78,14 +78,14 @@ SASS backend files (required):
 <code>sass/sm89/rckangaroo_kernels.cubin</code> and <code>sass/sm120/rckangaroo_kernels.cubin</code>.
 You can also set <code>RCK_SASS_DIR</code> to point to another base folder with the same structure.
 For DP export correctness, cubin launch geometry must match host launch geometry
-for that architecture (for sm120 this build expects group count 64).
+for that architecture.
 Advanced SASS runtime envs:
 <code>RCK_SASS_CUBIN</code> (direct cubin path),
 <code>RCK_SASS_VARIANT</code> (load <code>rckangaroo_kernels_&lt;variant&gt;.cubin</code> before default),
 <code>RCK_BLOCK_SIZE</code> (launch block size override, diagnostics/tuning),
 <code>RCK_GROUP_CNT</code> and <code>RCK_BLOCKCNT_MUL</code> for launch profile tuning.
-<code>RCK_SASS_STRICT</code> (default <code>1</code>): lock launch geometry to cubin contract; set to <code>0</code> only for diagnostics.
-For SM120/RTX 5090, default runtime launch profile uses group count 64.
+<code>RCK_SASS_STRICT</code> (default <code>1</code>): read compile-time contract symbols from cubin and lock runtime launch geometry to that contract; set to <code>0</code> only for diagnostics.
+Default SM120 profile in this branch is <code>b256g24</code>; build and select other variants explicitly when benchmarking.
 
 Benchmark script:
 <code>scripts/bench_seq.sh</code> and <code>scripts/run_main.sh</code>.
@@ -95,10 +95,10 @@ Examples:
 
 SASS cubin build scripts:
 <code>scripts/build_sass_cubin.sh</code> builds one cubin variant from <code>RCGpuCore.cu</code>.
-<code>scripts/build_sass_matrix.sh</code> builds a variant matrix and refreshes default cubins.
+<code>scripts/build_sass_matrix.sh</code> builds a variant matrix and refreshes default cubins from explicit default profiles.
 Examples:
 <code>./scripts/build_sass_cubin.sh sm_120 64 sass/sm120/rckangaroo_kernels.cubin 256</code>,
-<code>./scripts/build_sass_matrix.sh \"b256g16 b256g24 b256g32 b256g48 b256g64\" \"b256g24\"</code>.
+<code>./scripts/build_sass_matrix.sh \"b256g24 b256g32 b256g48 b256g64\" \"b256g24\" \"b256g24\" \"b256g24\"</code>.
 
 WDP quality check:
 <code>scripts/wdp_type_report.py</code> validates CRC/format and reports DP type distribution.

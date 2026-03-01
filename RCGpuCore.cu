@@ -10,6 +10,15 @@
 //imp2 table points for KernelA
 __device__ __constant__ u64 jmp2_table[8 * JMP_CNT];
 
+// Export compile-time kernel contract so host runtime can hard-validate
+// cubin geometry/limits before launching any kernels.
+extern "C" __device__ __constant__ u32 rck_contract_block_size = BLOCK_SIZE;
+extern "C" __device__ __constant__ u32 rck_contract_group_cnt = PNT_GROUP_CNT;
+extern "C" __device__ __constant__ u32 rck_contract_step_cnt = STEP_CNT;
+extern "C" __device__ __constant__ u32 rck_contract_jmp_cnt = JMP_CNT;
+extern "C" __device__ __constant__ u32 rck_contract_gpu_dp_size = GPU_DP_SIZE;
+extern "C" __device__ __constant__ u32 rck_contract_max_dp_cnt = MAX_DP_CNT;
+
 
 #define BLOCK_CNT	gridDim.x
 #define BLOCK_X		blockIdx.x

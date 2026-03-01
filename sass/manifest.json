@@ -22,11 +22,19 @@
     {
       "arch": "sm120",
       "cubin": "sm120/rckangaroo_kernels.cubin",
-      "default_variant": "b256g64",
+      "default_variant": "b256g24",
       "variants": [
         {
-          "name": "b256g64",
+          "name": "b256g24",
           "cubin": "sm120/rckangaroo_kernels.cubin",
+          "block_size": 256,
+          "group_cnt": 24,
+          "step_cnt": 1000,
+          "jmp_cnt": 512
+        },
+        {
+          "name": "b256g64",
+          "cubin": "sm120/rckangaroo_kernels_b256g64.cubin",
           "block_size": 256,
           "group_cnt": 64,
           "step_cnt": 1000,
