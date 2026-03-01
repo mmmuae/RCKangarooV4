@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -128,6 +129,84 @@ static bool IsEnvSet(const char* name)
 	return value && value[0];
 }
 
+static bool ReadEnvBool(const char* name, bool fallback)
+{
+	const char* value = getenv(name);
+	if (!value || !value[0])
+		return fallback;
+	auto EqNoCase = [](const char* a, const char* b) -> bool
+	{
+		if (!a || !b)
+			return false;
+		while (*a && *b)
+		{
+			if (tolower((unsigned char)*a) != tolower((unsigned char)*b))
+				return false;
+			a++;
+			b++;
+		}
+		return (*a == 0) && (*b == 0);
+	};
+	if ((strcmp(value, "0") == 0) || EqNoCase(value, "false") || EqNoCase(value, "off") || EqNoCase(value, "no"))
+		return false;
+	if ((strcmp(value, "1") == 0) || EqNoCase(value, "true") || EqNoCase(value, "on") || EqNoCase(value, "yes"))
+		return true;
+	return fallback;
+}
+
+static const char* PathBasename(const char* path)
+{
+	if (!path)
+		return "";
+	const char* slash = strrchr(path, '/');
+	const char* backslash = strrchr(path, '\\');
+	const char* p = slash;
+	if (!p || (backslash && backslash > p))
+		p = backslash;
+	return p ? (p + 1) : path;
+}
+
+static bool TryParseGroupHint(const char* text, u32& out_group)
+{
+	if (!text || !text[0])
+		return false;
+	for (size_t i = 0; text[i]; i++)
+	{
+		if ((text[i] != 'g') && (text[i] != 'G'))
+			continue;
+		size_t j = i + 1;
+		if (!isdigit((unsigned char)text[j]))
+			continue;
+		u32 val = 0;
+		while (isdigit((unsigned char)text[j]))
+		{
+			val = val * 10u + (u32)(text[j] - '0');
+			j++;
+		}
+		char term = text[j];
+		if (term && (term != '.') && (term != '_') && (term != '-') && (term != '/') && (term != '\\'))
+			continue;
+		if ((val >= 8u) && (val <= 128u) && ((val % 8u) == 0u))
+		{
+			out_group = val;
+			return true;
+		}
+	}
+	return false;
+}
+
+static u32 DefaultGroupCntByArch(bool isOldGpu, int sm_major, int sm_minor)
+{
+	if (isOldGpu)
+		return PNT_GROUP_OLD_GPU;
+	// Hopper/Blackwell profile for pure SASS in this branch.
+	if ((sm_major >= 12) && (sm_minor >= 0))
+		return 64;
+	if ((sm_major == 8) && (sm_minor == 9))
+		return 24;
+	return PNT_GROUP_NEW_GPU;
+}
+
 static double MinDpsPerKangTargetByRange(int rangeBits)
 {
 	if (rangeBits <= 80)
@@ -176,7 +255,7 @@ static void TuneGroupCntForMainSolve(u32& groupCnt, u32 blockCnt, u32 blockSize,
 int RCGpuKang::CalcKangCnt(int rangeBits, int dpBits, u32 runMode)
 {
 	ResolveLaunchConfig(Kparams.BlockCnt, Kparams.BlockSize, Kparams.GroupCnt);
-	if ((runMode == KANG_MODE_MAIN) && !IsEnvSet("RCK_GROUP_CNT"))
+	if ((runMode == KANG_MODE_MAIN) && !IsEnvSet("RCK_GROUP_CNT") && !LaunchGroupLocked)
 		TuneGroupCntForMainSolve(Kparams.GroupCnt, Kparams.BlockCnt, Kparams.BlockSize, rangeBits, dpBits, CudaIndex);
 	return Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 }
@@ -198,16 +277,69 @@ void RCGpuKang::SetBackendError(const char* fmt, ...)
 void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt)
 {
 	blockSize = IsOldGpu ? BLOCK_SIZE_OLD_GPU : BLOCK_SIZE_NEW_GPU;
-	groupCnt = IsOldGpu ? PNT_GROUP_OLD_GPU : PNT_GROUP_NEW_GPU;
-	if (!IsOldGpu && (SmMajor >= 12))
-		groupCnt = 64;
+	LaunchConfigError[0] = 0;
+	LaunchConfigSource[0] = 0;
+	LaunchStrictMode = ReadEnvBool("RCK_SASS_STRICT", true);
+	LaunchGroupLocked = false;
+	LaunchContractGroupCnt = DefaultGroupCntByArch(IsOldGpu, SmMajor, SmMinor);
+	groupCnt = LaunchContractGroupCnt;
+
+	const char* variant = getenv("RCK_SASS_VARIANT");
+	u32 hinted_group = 0;
+	if (TryParseGroupHint(variant, hinted_group))
+	{
+		LaunchContractGroupCnt = hinted_group;
+		groupCnt = hinted_group;
+		snprintf(LaunchConfigSource, sizeof(LaunchConfigSource), "variant=%s", variant);
+		LaunchGroupLocked = true;
+	}
+	else
+	{
+		const char* direct_cubin = getenv("RCK_SASS_CUBIN");
+		if (direct_cubin && direct_cubin[0])
+		{
+			const char* cubin_name = PathBasename(direct_cubin);
+			if (TryParseGroupHint(cubin_name, hinted_group))
+			{
+				LaunchContractGroupCnt = hinted_group;
+				groupCnt = hinted_group;
+				snprintf(LaunchConfigSource, sizeof(LaunchConfigSource), "cubin=%s", cubin_name);
+				LaunchGroupLocked = true;
+			}
+		}
+	}
+
+	if (!LaunchConfigSource[0])
+		snprintf(LaunchConfigSource, sizeof(LaunchConfigSource), "arch_default");
 
 	// Optional env overrides for quick tuning without CLI churn.
+	bool env_group_set = IsEnvSet("RCK_GROUP_CNT");
 	int envGroupCnt = ReadEnvIntBounded("RCK_GROUP_CNT", groupCnt, 8, 64);
 	envGroupCnt = (envGroupCnt / 8) * 8;
 	if (envGroupCnt < 8)
 		envGroupCnt = 8;
-	groupCnt = envGroupCnt;
+	if (env_group_set)
+	{
+		if (LaunchStrictMode && (u32)envGroupCnt != LaunchContractGroupCnt)
+		{
+			snprintf(
+				LaunchConfigError,
+				sizeof(LaunchConfigError),
+				"RCK_GROUP_CNT=%d mismatches SASS contract group=%u (%s). Use matching cubin/profile or set RCK_SASS_STRICT=0.",
+				envGroupCnt,
+				LaunchContractGroupCnt,
+				LaunchConfigSource);
+		}
+		groupCnt = (u32)envGroupCnt;
+	}
+
+	// In strict mode we lock launch geometry to the cubin contract to prevent
+	// silent DP-class regressions from host/cubin desync.
+	if (LaunchStrictMode)
+	{
+		groupCnt = LaunchContractGroupCnt;
+		LaunchGroupLocked = true;
+	}
 
 	int blockCntMul = ReadEnvIntBounded("RCK_BLOCKCNT_MUL", 1, 1, 4);
 	blockCnt = mpCnt * blockCntMul;
@@ -241,6 +373,32 @@ bool RCGpuKang::InitSassBackend(const u64* jmp2_table)
 	if (!BuildSassCubinPath(dev_prop.major, dev_prop.minor, cubin_path, sizeof(cubin_path)))
 	{
 		SetBackendError("no SASS cubin for sm%d%d (searched RCK_SASS_CUBIN, RCK_SASS_DIR, ./sass)", dev_prop.major, dev_prop.minor);
+		return false;
+	}
+	const char* variant = getenv("RCK_SASS_VARIANT");
+	const char* direct_cubin = getenv("RCK_SASS_CUBIN");
+	if (LaunchStrictMode && variant && variant[0] && !(direct_cubin && direct_cubin[0]))
+	{
+		char expected_tail[96];
+		snprintf(expected_tail, sizeof(expected_tail), "_%s.cubin", variant);
+		if (!strstr(PathBasename(cubin_path), expected_tail))
+		{
+			SetBackendError(
+				"requested variant '%s' not found (loaded %s). Build matching cubin or unset RCK_SASS_VARIANT.",
+				variant,
+				PathBasename(cubin_path));
+			return false;
+		}
+	}
+	u32 path_group_hint = 0;
+	const bool has_path_hint = TryParseGroupHint(PathBasename(cubin_path), path_group_hint);
+	if (LaunchStrictMode && has_path_hint && (path_group_hint != Kparams.GroupCnt))
+	{
+		SetBackendError(
+			"launch group=%u mismatches cubin hint group=%u (%s)",
+			Kparams.GroupCnt,
+			path_group_hint,
+			PathBasename(cubin_path));
 		return false;
 	}
 
@@ -524,6 +682,11 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	SassKernelGen = nullptr;
 	BackendError[0] = 0;
 	LoadedSassPath[0] = 0;
+	LaunchConfigError[0] = 0;
+	LaunchConfigSource[0] = 0;
+	LaunchContractGroupCnt = 0;
+	LaunchGroupLocked = false;
+	LaunchStrictMode = true;
 
 	auto FailPrepare = [&]() -> bool
 	{
@@ -546,6 +709,11 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	}
 
 	ResolveLaunchConfig(Kparams.BlockCnt, Kparams.BlockSize, Kparams.GroupCnt);
+	if (LaunchConfigError[0])
+	{
+		printf("GPU %d, launch profile error: %s\r\n", CudaIndex, LaunchConfigError);
+		return FailPrepare();
+	}
 	if (gDpExportMode == DP_EXPORT_WILD)
 		Kparams.RunMode = KANG_MODE_EXPORT_WILD;
 	else if (gDpExportMode == DP_EXPORT_TAME)
@@ -556,7 +724,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		Kparams.RunMode = KANG_MODE_GEN_TAME;
 	else
 		Kparams.RunMode = KANG_MODE_MAIN;
-	if ((Kparams.RunMode == KANG_MODE_MAIN) && !IsEnvSet("RCK_GROUP_CNT"))
+	if ((Kparams.RunMode == KANG_MODE_MAIN) && !IsEnvSet("RCK_GROUP_CNT") && !LaunchGroupLocked)
 		TuneGroupCntForMainSolve(Kparams.GroupCnt, Kparams.BlockCnt, Kparams.BlockSize, Range, DP, CudaIndex);
 
 	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
@@ -783,6 +951,12 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		Kparams.GroupCnt,
 		SmMajor,
 		SmMinor);
+	printf(
+		"GPU %d: launch contract group=%u source=%s strict=%s\r\n",
+		CudaIndex,
+		LaunchContractGroupCnt,
+		LaunchConfigSource[0] ? LaunchConfigSource : "unknown",
+		LaunchStrictMode ? "on" : "off");
 
 	printf("GPU %d: allocated %llu MB, %d kangaroos. OldGpuMode: %s\r\n", CudaIndex, total_mem / (1024 * 1024), KangCnt, IsOldGpu ? "Yes" : "No");
 	return true;

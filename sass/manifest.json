@@ -1,16 +1,38 @@
 {
   "name": "rckangaroo-sass-kernels",
-  "version": "v4",
+  "version": "v5",
   "architectures": [
     {
       "arch": "sm89",
       "cubin": "sm89/rckangaroo_kernels.cubin",
+      "default_variant": "g24",
+      "variants": [
+        {
+          "name": "g24",
+          "cubin": "sm89/rckangaroo_kernels.cubin",
+          "block_size": 256,
+          "group_cnt": 24,
+          "step_cnt": 1000,
+          "jmp_cnt": 512
+        }
+      ],
       "kernels": ["KernelA", "KernelB", "KernelC", "KernelGen"],
       "constant_symbols": ["jmp2_table"]
     },
     {
       "arch": "sm120",
       "cubin": "sm120/rckangaroo_kernels.cubin",
+      "default_variant": "g64",
+      "variants": [
+        {
+          "name": "g64",
+          "cubin": "sm120/rckangaroo_kernels.cubin",
+          "block_size": 256,
+          "group_cnt": 64,
+          "step_cnt": 1000,
+          "jmp_cnt": 512
+        }
+      ],
       "kernels": ["KernelA", "KernelB", "KernelC", "KernelGen"],
       "constant_symbols": ["jmp2_table"]
     }
@@ -20,6 +42,8 @@
     "Runtime is SASS-only and will fail if cubin is absent or incompatible.",
     "Set RCK_SASS_DIR to override the base sass directory at runtime.",
     "Set RCK_SASS_CUBIN to load a direct cubin path.",
-    "Set RCK_SASS_VARIANT to try rckangaroo_kernels_<variant>.cubin before default."
+    "Set RCK_SASS_VARIANT to try rckangaroo_kernels_<variant>.cubin before default.",
+    "Runtime launch geometry must match cubin compile-time geometry.",
+    "Use RCK_SASS_STRICT=1 (default) to lock launch geometry to cubin contract."
   ]
 }

@@ -62,6 +62,11 @@ private:
 	bool DpBufferPinned;
 	char BackendError[256];
 	char LoadedSassPath[512];
+	char LaunchConfigError[256];
+	char LaunchConfigSource[96];
+	u32 LaunchContractGroupCnt;
+	bool LaunchGroupLocked;
+	bool LaunchStrictMode;
 
 	void GenerateRndDistances();
 	void ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt);
