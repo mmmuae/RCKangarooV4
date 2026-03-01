@@ -36,7 +36,10 @@ TARGET := rckangaroo
 
 all: $(TARGET)
 
-.PHONY: sass-sm120-g64 sass-matrix
+.PHONY: sass-sm120-default sass-sm120-g64 sass-matrix
+sass-sm120-default:
+	$(NVCC) -O3 -std=c++17 -I$(CUDA_PATH)/include -arch=sm_120 --cubin -DBLOCK_SIZE_NEW_GPU=256 -DPNT_GROUP_NEW_GPU=24 RCGpuCore.cu -o sass/sm120/rckangaroo_kernels.cubin
+
 sass-sm120-g64:
 	$(NVCC) -O3 -std=c++17 -I$(CUDA_PATH)/include -arch=sm_120 --cubin -DBLOCK_SIZE_NEW_GPU=256 -DPNT_GROUP_NEW_GPU=64 RCGpuCore.cu -o sass/sm120/rckangaroo_kernels.cubin
 

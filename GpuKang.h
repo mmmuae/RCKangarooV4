@@ -68,6 +68,8 @@ private:
 	u32 LaunchContractGroupCnt;
 	bool LaunchGroupLocked;
 	bool LaunchStrictMode;
+	bool LaunchEnvBlockSet;
+	bool LaunchEnvGroupSet;
 
 	void GenerateRndDistances();
 	void ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt);
