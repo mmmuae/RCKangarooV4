@@ -74,6 +74,8 @@ If <code>-pubkey</code> is not provided, the app runs in benchmark mode by desig
 SASS backend files (required):
 <code>sass/sm89/rckangaroo_kernels.cubin</code> and <code>sass/sm120/rckangaroo_kernels.cubin</code>.
 You can also set <code>RCK_SASS_DIR</code> to point to another base folder with the same structure.
+For DP export correctness, cubin launch geometry must match host launch geometry
+for that architecture (for sm120 this build expects group count 64).
 Advanced SASS runtime envs:
 <code>RCK_SASS_CUBIN</code> (direct cubin path),
 <code>RCK_SASS_VARIANT</code> (load <code>rckangaroo_kernels_&lt;variant&gt;.cubin</code> before default),
