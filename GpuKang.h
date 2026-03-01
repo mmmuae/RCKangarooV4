@@ -64,6 +64,7 @@ private:
 	char LoadedSassPath[512];
 	char LaunchConfigError[256];
 	char LaunchConfigSource[96];
+	u32 LaunchContractBlockSize;
 	u32 LaunchContractGroupCnt;
 	bool LaunchGroupLocked;
 	bool LaunchStrictMode;
