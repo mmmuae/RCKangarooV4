@@ -5,10 +5,10 @@
     {
       "arch": "sm89",
       "cubin": "sm89/rckangaroo_kernels.cubin",
-      "default_variant": "g24",
+      "default_variant": "b256g24",
       "variants": [
         {
-          "name": "g24",
+          "name": "b256g24",
           "cubin": "sm89/rckangaroo_kernels.cubin",
           "block_size": 256,
           "group_cnt": 24,
@@ -22,10 +22,10 @@
     {
       "arch": "sm120",
       "cubin": "sm120/rckangaroo_kernels.cubin",
-      "default_variant": "g64",
+      "default_variant": "b256g64",
       "variants": [
         {
-          "name": "g64",
+          "name": "b256g64",
           "cubin": "sm120/rckangaroo_kernels.cubin",
           "block_size": 256,
           "group_cnt": 64,

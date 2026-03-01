@@ -195,6 +195,35 @@ static bool TryParseGroupHint(const char* text, u32& out_group)
 	return false;
 }
 
+static bool TryParseBlockHint(const char* text, u32& out_block)
+{
+	if (!text || !text[0])
+		return false;
+	for (size_t i = 0; text[i]; i++)
+	{
+		if ((text[i] != 'b') && (text[i] != 'B'))
+			continue;
+		size_t j = i + 1;
+		if (!isdigit((unsigned char)text[j]))
+			continue;
+		u32 val = 0;
+		while (isdigit((unsigned char)text[j]))
+		{
+			val = val * 10u + (u32)(text[j] - '0');
+			j++;
+		}
+		char term = text[j];
+		if (term && (term != '.') && (term != '_') && (term != '-') && (term != '/') && (term != '\\'))
+			continue;
+		if ((val >= 64u) && (val <= 1024u) && ((val % 32u) == 0u))
+		{
+			out_block = val;
+			return true;
+		}
+	}
+	return false;
+}
+
 static u32 DefaultGroupCntByArch(bool isOldGpu, int sm_major, int sm_minor)
 {
 	if (isOldGpu)
@@ -281,15 +310,28 @@ void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt
 	LaunchConfigSource[0] = 0;
 	LaunchStrictMode = ReadEnvBool("RCK_SASS_STRICT", true);
 	LaunchGroupLocked = false;
+	LaunchContractBlockSize = blockSize;
 	LaunchContractGroupCnt = DefaultGroupCntByArch(IsOldGpu, SmMajor, SmMinor);
+	blockSize = LaunchContractBlockSize;
 	groupCnt = LaunchContractGroupCnt;
 
 	const char* variant = getenv("RCK_SASS_VARIANT");
 	u32 hinted_group = 0;
-	if (TryParseGroupHint(variant, hinted_group))
+	u32 hinted_block = 0;
+	const bool has_group_hint = TryParseGroupHint(variant, hinted_group);
+	const bool has_block_hint = TryParseBlockHint(variant, hinted_block);
+	if (has_group_hint || has_block_hint)
 	{
-		LaunchContractGroupCnt = hinted_group;
-		groupCnt = hinted_group;
+		if (has_group_hint)
+		{
+			LaunchContractGroupCnt = hinted_group;
+			groupCnt = hinted_group;
+		}
+		if (has_block_hint)
+		{
+			LaunchContractBlockSize = hinted_block;
+			blockSize = hinted_block;
+		}
 		snprintf(LaunchConfigSource, sizeof(LaunchConfigSource), "variant=%s", variant);
 		LaunchGroupLocked = true;
 	}
@@ -299,10 +341,20 @@ void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt
 		if (direct_cubin && direct_cubin[0])
 		{
 			const char* cubin_name = PathBasename(direct_cubin);
-			if (TryParseGroupHint(cubin_name, hinted_group))
+			const bool has_cubin_group = TryParseGroupHint(cubin_name, hinted_group);
+			const bool has_cubin_block = TryParseBlockHint(cubin_name, hinted_block);
+			if (has_cubin_group || has_cubin_block)
 			{
-				LaunchContractGroupCnt = hinted_group;
-				groupCnt = hinted_group;
+				if (has_cubin_group)
+				{
+					LaunchContractGroupCnt = hinted_group;
+					groupCnt = hinted_group;
+				}
+				if (has_cubin_block)
+				{
+					LaunchContractBlockSize = hinted_block;
+					blockSize = hinted_block;
+				}
 				snprintf(LaunchConfigSource, sizeof(LaunchConfigSource), "cubin=%s", cubin_name);
 				LaunchGroupLocked = true;
 			}
@@ -333,15 +385,36 @@ void RCGpuKang::ResolveLaunchConfig(u32& blockCnt, u32& blockSize, u32& groupCnt
 		groupCnt = (u32)envGroupCnt;
 	}
 
+	bool env_block_set = IsEnvSet("RCK_BLOCK_SIZE");
+	int envBlockSize = ReadEnvIntBounded("RCK_BLOCK_SIZE", (int)blockSize, 64, 1024);
+	envBlockSize = (envBlockSize / 32) * 32;
+	if (envBlockSize < 64)
+		envBlockSize = 64;
+	if (env_block_set)
+	{
+		if (LaunchStrictMode && (u32)envBlockSize != LaunchContractBlockSize)
+		{
+			snprintf(
+				LaunchConfigError,
+				sizeof(LaunchConfigError),
+				"RCK_BLOCK_SIZE=%d mismatches SASS contract block=%u (%s). Use matching cubin/profile or set RCK_SASS_STRICT=0.",
+				envBlockSize,
+				LaunchContractBlockSize,
+				LaunchConfigSource);
+		}
+		blockSize = (u32)envBlockSize;
+	}
+
 	// In strict mode we lock launch geometry to the cubin contract to prevent
 	// silent DP-class regressions from host/cubin desync.
 	if (LaunchStrictMode)
 	{
+		blockSize = LaunchContractBlockSize;
 		groupCnt = LaunchContractGroupCnt;
 		LaunchGroupLocked = true;
 	}
 
-	int blockCntMul = ReadEnvIntBounded("RCK_BLOCKCNT_MUL", 1, 1, 4);
+	int blockCntMul = ReadEnvIntBounded("RCK_BLOCKCNT_MUL", 1, 1, 8);
 	blockCnt = mpCnt * blockCntMul;
 }
 
@@ -391,13 +464,24 @@ bool RCGpuKang::InitSassBackend(const u64* jmp2_table)
 		}
 	}
 	u32 path_group_hint = 0;
+	u32 path_block_hint = 0;
 	const bool has_path_hint = TryParseGroupHint(PathBasename(cubin_path), path_group_hint);
+	const bool has_path_block_hint = TryParseBlockHint(PathBasename(cubin_path), path_block_hint);
 	if (LaunchStrictMode && has_path_hint && (path_group_hint != Kparams.GroupCnt))
 	{
 		SetBackendError(
 			"launch group=%u mismatches cubin hint group=%u (%s)",
 			Kparams.GroupCnt,
 			path_group_hint,
+			PathBasename(cubin_path));
+		return false;
+	}
+	if (LaunchStrictMode && has_path_block_hint && (path_block_hint != Kparams.BlockSize))
+	{
+		SetBackendError(
+			"launch block=%u mismatches cubin hint block=%u (%s)",
+			Kparams.BlockSize,
+			path_block_hint,
 			PathBasename(cubin_path));
 		return false;
 	}
@@ -684,6 +768,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	LoadedSassPath[0] = 0;
 	LaunchConfigError[0] = 0;
 	LaunchConfigSource[0] = 0;
+	LaunchContractBlockSize = 0;
 	LaunchContractGroupCnt = 0;
 	LaunchGroupLocked = false;
 	LaunchStrictMode = true;
@@ -952,8 +1037,9 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		SmMajor,
 		SmMinor);
 	printf(
-		"GPU %d: launch contract group=%u source=%s strict=%s\r\n",
+		"GPU %d: launch contract block=%u group=%u source=%s strict=%s\r\n",
 		CudaIndex,
+		LaunchContractBlockSize,
 		LaunchContractGroupCnt,
 		LaunchConfigSource[0] ? LaunchConfigSource : "unknown",
 		LaunchStrictMode ? "on" : "off");

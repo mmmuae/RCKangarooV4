@@ -4,15 +4,16 @@ set -euo pipefail
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'USAGE'
 Usage:
-  scripts/build_sass_cubin.sh <arch> <group_cnt> [output]
+  scripts/build_sass_cubin.sh <arch> <group_cnt> [output] [block_size]
 
 Examples:
-  scripts/build_sass_cubin.sh sm_120 64 sass/sm120/rckangaroo_kernels.cubin
-  scripts/build_sass_cubin.sh sm_120 32 sass/sm120/rckangaroo_kernels_g32.cubin
+  scripts/build_sass_cubin.sh sm_120 64 sass/sm120/rckangaroo_kernels.cubin 256
+  scripts/build_sass_cubin.sh sm_120 32 sass/sm120/rckangaroo_kernels_b256g32.cubin 256
 
 Notes:
 - pure SASS only: this script builds cubin files from RCGpuCore.cu.
 - group_cnt sets PNT_GROUP_NEW_GPU at compile time.
+- block_size sets BLOCK_SIZE_NEW_GPU at compile time (default 256).
 USAGE
   exit 0
 fi
@@ -20,6 +21,7 @@ fi
 ARCH="${1:-}"
 GROUP="${2:-}"
 OUT="${3:-}"
+BLOCK="${4:-256}"
 
 if [[ -z "$ARCH" || -z "$GROUP" ]]; then
   echo "error: arch and group_cnt are required"
@@ -34,6 +36,14 @@ if (( GROUP < 8 || GROUP > 128 || GROUP % 8 != 0 )); then
   echo "error: group_cnt must be divisible by 8 in [8, 128]"
   exit 1
 fi
+if ! [[ "$BLOCK" =~ ^[0-9]+$ ]]; then
+  echo "error: block_size must be integer"
+  exit 1
+fi
+if (( BLOCK < 64 || BLOCK > 1024 || BLOCK % 32 != 0 )); then
+  echo "error: block_size must be divisible by 32 in [64, 1024]"
+  exit 1
+fi
 
 case "$ARCH" in
   sm_120) ARCH_DIR="sm120" ;;
@@ -45,7 +55,7 @@ case "$ARCH" in
 esac
 
 if [[ -z "$OUT" ]]; then
-  OUT="sass/${ARCH_DIR}/rckangaroo_kernels_g${GROUP}.cubin"
+  OUT="sass/${ARCH_DIR}/rckangaroo_kernels_b${BLOCK}g${GROUP}.cubin"
 fi
 
 if [[ ! -f RCGpuCore.cu ]]; then
@@ -62,8 +72,9 @@ fi
 
 mkdir -p "$(dirname "$OUT")"
 
-echo "build: arch=$ARCH group=$GROUP out=$OUT"
+echo "build: arch=$ARCH block=$BLOCK group=$GROUP out=$OUT"
 "$NVCC" -O3 -std=c++17 -I"$CUDA_PATH/include" -arch="$ARCH" --cubin \
+  -DBLOCK_SIZE_NEW_GPU="$BLOCK" \
   -DPNT_GROUP_NEW_GPU="$GROUP" \
   RCGpuCore.cu -o "$OUT"
 

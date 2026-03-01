@@ -82,6 +82,7 @@ for that architecture (for sm120 this build expects group count 64).
 Advanced SASS runtime envs:
 <code>RCK_SASS_CUBIN</code> (direct cubin path),
 <code>RCK_SASS_VARIANT</code> (load <code>rckangaroo_kernels_&lt;variant&gt;.cubin</code> before default),
+<code>RCK_BLOCK_SIZE</code> (launch block size override, diagnostics/tuning),
 <code>RCK_GROUP_CNT</code> and <code>RCK_BLOCKCNT_MUL</code> for launch profile tuning.
 <code>RCK_SASS_STRICT</code> (default <code>1</code>): lock launch geometry to cubin contract; set to <code>0</code> only for diagnostics.
 For SM120/RTX 5090, default runtime launch profile uses group count 64.
@@ -96,13 +97,16 @@ SASS cubin build scripts:
 <code>scripts/build_sass_cubin.sh</code> builds one cubin variant from <code>RCGpuCore.cu</code>.
 <code>scripts/build_sass_matrix.sh</code> builds a variant matrix and refreshes default cubins.
 Examples:
-<code>./scripts/build_sass_cubin.sh sm_120 64 sass/sm120/rckangaroo_kernels.cubin</code>,
-<code>./scripts/build_sass_matrix.sh \"16 24 32 48 64\" \"24\"</code>.
+<code>./scripts/build_sass_cubin.sh sm_120 64 sass/sm120/rckangaroo_kernels.cubin 256</code>,
+<code>./scripts/build_sass_matrix.sh \"b256g16 b256g24 b256g32 b256g48 b256g64\" \"b256g24\"</code>.
 
 WDP quality check:
 <code>scripts/wdp_type_report.py</code> validates CRC/format and reports DP type distribution.
 Example:
 <code>./scripts/wdp_type_report.py /path/to/spool</code>.
+
+DP export benchmark matrix:
+<code>scripts/bench_dpf_matrix.sh</code> runs timed mode/variant sweeps and reports speed with WDP type mix.
 
 Compatibility aliases:
 <code>-dp-export</code> -> <code>-dpf-mode</code>,
