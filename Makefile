@@ -1,4 +1,5 @@
 CXX ?= g++
+NVCC ?=
 CUDA_PATH ?=
 CUDA_HOME ?=
 RCK_DEFS ?=
@@ -11,6 +12,10 @@ ifeq ($(strip $(CUDA_PATH)),)
   else
     CUDA_PATH := /usr
   endif
+endif
+
+ifeq ($(strip $(NVCC)),)
+  NVCC := $(CUDA_PATH)/bin/nvcc
 endif
 
 ifeq ($(wildcard $(CUDA_PATH)/include/cuda_runtime.h),)
@@ -30,6 +35,10 @@ CPP_OBJECTS := $(CPU_SRC:.cpp=.o)
 TARGET := rckangaroo
 
 all: $(TARGET)
+
+.PHONY: sass-sm120-g64
+sass-sm120-g64:
+	$(NVCC) -O3 -std=c++17 -I$(CUDA_PATH)/include -arch=sm_120 --cubin -DPNT_GROUP_NEW_GPU=64 RCGpuCore.cu -o sass/sm120/rckangaroo_kernels.cubin
 
 $(TARGET): $(CPP_OBJECTS)
 	$(CXX) $(CCFLAGS) -o $@ $^ $(LDFLAGS)
