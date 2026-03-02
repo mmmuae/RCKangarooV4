@@ -343,6 +343,42 @@ static u32 DefaultGroupCntByArch(bool isOldGpu, int sm_major, int sm_minor)
 	return PNT_GROUP_NEW_GPU;
 }
 
+static void InferContractFromFallback(
+	const char* cubin_path,
+	bool isOldGpu,
+	int sm_major,
+	int sm_minor,
+	SassLaunchContract& out,
+	char* out_source,
+	size_t out_source_size)
+{
+	memset(&out, 0, sizeof(out));
+	out.block_size = isOldGpu ? BLOCK_SIZE_OLD_GPU : BLOCK_SIZE_NEW_GPU;
+	out.group_cnt = DefaultGroupCntByArch(isOldGpu, sm_major, sm_minor);
+	out.step_cnt = STEP_CNT;
+	out.jmp_cnt = JMP_CNT;
+	out.gpu_dp_size = GPU_DP_SIZE;
+	out.max_dp_cnt = MAX_DP_CNT;
+
+	const char* base = PathBasename(cubin_path);
+	u32 hinted_block = 0;
+	u32 hinted_group = 0;
+	const bool has_block_hint = TryParseBlockHint(base, hinted_block);
+	const bool has_group_hint = TryParseGroupHint(base, hinted_group);
+	if (has_block_hint)
+		out.block_size = hinted_block;
+	if (has_group_hint)
+		out.group_cnt = hinted_group;
+
+	if (out_source && out_source_size)
+	{
+		if (has_block_hint || has_group_hint)
+			snprintf(out_source, out_source_size, "fallback:path_hint:%s", base);
+		else
+			snprintf(out_source, out_source_size, "fallback:arch_default:%s", base);
+	}
+}
+
 static double MinDpsPerKangTargetByRange(int rangeBits)
 {
 	if (rangeBits <= 80)
@@ -981,14 +1017,48 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 				Kparams.GroupCnt = probe_contract.group_cnt;
 		}
 	}
-	else if (LaunchStrictMode)
-	{
-		printf("GPU %d, launch profile error: cannot read cubin contract: %s\r\n", CudaIndex, probe_err);
-		return FailPrepare();
-	}
 	else
 	{
-		printf("GPU %d: warning: cannot read cubin contract (%s), using host launch profile\r\n", CudaIndex, probe_err);
+		SassLaunchContract inferred_contract;
+		char inferred_source[96];
+		InferContractFromFallback(
+			probe_cubin_path,
+			IsOldGpu,
+			SmMajor,
+			SmMinor,
+			inferred_contract,
+			inferred_source,
+			sizeof(inferred_source));
+
+		LaunchContractBlockSize = inferred_contract.block_size;
+		LaunchContractGroupCnt = inferred_contract.group_cnt;
+		snprintf(LaunchConfigSource, sizeof(LaunchConfigSource), "%s", inferred_source);
+
+		printf("GPU %d: warning: cannot read cubin contract (%s), using %s block=%u group=%u\r\n",
+			CudaIndex,
+			probe_err,
+			inferred_source,
+			inferred_contract.block_size,
+			inferred_contract.group_cnt);
+
+		if (LaunchStrictMode)
+		{
+			if (LaunchEnvBlockSet && (Kparams.BlockSize != inferred_contract.block_size))
+			{
+				printf("GPU %d, launch profile error: RCK_BLOCK_SIZE=%u mismatches inferred block=%u\r\n",
+					CudaIndex, Kparams.BlockSize, inferred_contract.block_size);
+				return FailPrepare();
+			}
+			if (LaunchEnvGroupSet && (Kparams.GroupCnt != inferred_contract.group_cnt))
+			{
+				printf("GPU %d, launch profile error: RCK_GROUP_CNT=%u mismatches inferred group=%u\r\n",
+					CudaIndex, Kparams.GroupCnt, inferred_contract.group_cnt);
+				return FailPrepare();
+			}
+			Kparams.BlockSize = inferred_contract.block_size;
+			Kparams.GroupCnt = inferred_contract.group_cnt;
+			LaunchGroupLocked = true;
+		}
 	}
 
 	if ((Kparams.RunMode == KANG_MODE_MAIN) && !IsEnvSet("RCK_GROUP_CNT") && !LaunchGroupLocked)
