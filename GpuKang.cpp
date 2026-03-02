@@ -1184,8 +1184,8 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	u64 size;
 	if (!IsOldGpu)
 	{
-		//L2	
-		int L2size = Kparams.KangCnt * (3 * 32);
+		//L2 (x,y,inv scratch + coalesced distance cache for fused step kernels)
+		int L2size = Kparams.KangCnt * (3 * 32 + 3 * 8);
 		total_mem += L2size;
 			err = cudaMalloc((void**)&Kparams.L2, L2size);
 			if (err != cudaSuccess)

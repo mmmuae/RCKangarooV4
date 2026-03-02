@@ -726,13 +726,16 @@ __device__ __forceinline__ bool ProcessFusedDistanceAndLoop(
 	u32 step_ind,
 	u16 jmp_flags,
 	u32 kang_ind,
-	const u64* x_after)
+	u64 kang_linear,
+	const u64* x_after,
+	u64* d0_ptr,
+	u64* d1_ptr,
+	u64* d2_ptr)
 {
-	u64* d_ptr = Kparams.Kangs + (u64)kang_ind * 12 + 8;
 	__align__(16) u64 d[3];
-	d[0] = d_ptr[0];
-	d[1] = d_ptr[1];
-	d[2] = d_ptr[2];
+	d[0] = *d0_ptr;
+	d[1] = *d1_ptr;
+	d[2] = *d2_ptr;
 
 	const u64* jmp_tbl = (jmp_flags & JMP2_FLAG) ? Kparams.Jumps2 : Kparams.Jumps1;
 	const u64* jmp_d = jmp_tbl + (u64)(jmp_flags & JMP_MASK) * 12 + 8;
@@ -746,30 +749,31 @@ __device__ __forceinline__ bool ProcessFusedDistanceAndLoop(
 	else
 		Add192to192(d, jmp);
 
-	d_ptr[0] = d[0];
-	d_ptr[1] = d[1];
-	d_ptr[2] = d[2];
+	*d0_ptr = d[0];
+	*d1_ptr = d[1];
+	*d2_ptr = d[2];
 
 	const u32 iter = step_ind % MD_LEN;
-	u64* table = Kparams.LoopTable + (u64)kang_ind * MD_LEN;
+	const u64 table_stride = (u64)Kparams.KangCnt;
+	u64* table = Kparams.LoopTable + kang_linear;
 	int found_ind = (int)iter + MD_LEN - 4;
 	while (1)
 	{
-		if (table[found_ind % MD_LEN] == d[0])
+		if (table[(u64)(found_ind % MD_LEN) * table_stride] == d[0])
 			break;
 		found_ind -= 2;
-		if (table[found_ind % MD_LEN] == d[0])
+		if (table[(u64)(found_ind % MD_LEN) * table_stride] == d[0])
 			break;
 		found_ind -= 2;
-		if (table[found_ind % MD_LEN] == d[0])
+		if (table[(u64)(found_ind % MD_LEN) * table_stride] == d[0])
 			break;
 		found_ind = (int)iter;
-		if (table[found_ind] == d[0])
+		if (table[(u64)found_ind * table_stride] == d[0])
 			break;
 		found_ind = -1;
 		break;
 	}
-	table[iter] = d[0];
+	table[(u64)iter * table_stride] = d[0];
 
 	if (found_ind < 0)
 	{
@@ -795,6 +799,9 @@ __device__ __forceinline__ void KernelStepBodyFused(const TKparams Kparams)
 	u64* L2x = Kparams.L2 + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_X;
 	u64* L2y = L2x + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
 	u64* L2s = L2y + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
+	u64* D0 = L2s + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
+	u64* D1 = D0 + PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
+	u64* D2 = D1 + PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
 	u64* x_last0 = Kparams.LastPnts + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_X;
 	u64* y_last0 = x_last0 + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
 
@@ -813,6 +820,8 @@ __device__ __forceinline__ void KernelStepBodyFused(const TKparams Kparams)
 	__align__(16) u64 x[4], y[4], tmp[4], tmp2[4];
 	u64 dp_mask64 = ~((1ull << (64 - Kparams.DP)) - 1);
 	u32 kang_base = PNT_GROUP_CNT * (THREAD_X + BLOCK_X * BLOCK_SIZE);
+	u64 dist_stride = (u64)BLOCK_SIZE * BLOCK_CNT;
+	u64 dist_base = (u64)BLOCK_X * BLOCK_SIZE + THREAD_X;
 
 	for (u32 group = 0; group < PNT_GROUP_CNT; group++)
 	{
@@ -826,6 +835,10 @@ __device__ __forceinline__ void KernelStepBodyFused(const TKparams Kparams)
 		tmp[2] = Kparams.Kangs[(kang_base + group) * 12 + 6];
 		tmp[3] = Kparams.Kangs[(kang_base + group) * 12 + 7];
 		SAVE_VAL_256(L2y, tmp, group);
+		u64 didx = dist_base + (u64)group * dist_stride;
+		D0[didx] = Kparams.Kangs[(kang_base + group) * 12 + 8];
+		D1[didx] = Kparams.Kangs[(kang_base + group) * 12 + 9];
+		D2[didx] = Kparams.Kangs[(kang_base + group) * 12 + 10];
 	}
 
 	u64 L1S2 = Kparams.L1S2[BLOCK_X * BLOCK_SIZE + THREAD_X];
@@ -921,7 +934,18 @@ __device__ __forceinline__ void KernelStepBodyFused(const TKparams Kparams)
 			if (!is_looped)
 			{
 				u32 kang_ind = kang_base + (u32)group;
-				if (ProcessFusedDistanceAndLoop<RUN_MODE>(Kparams, step_ind, d_cur, kang_ind, x))
+				u64 kang_linear = ((u64)BLOCK_X * PNT_GROUP_CNT + (u64)group) * BLOCK_SIZE + THREAD_X;
+				u64 didx = dist_base + (u64)group * dist_stride;
+				if (ProcessFusedDistanceAndLoop<RUN_MODE>(
+					Kparams,
+					step_ind,
+					d_cur,
+					kang_ind,
+					kang_linear,
+					x,
+					D0 + didx,
+					D1 + didx,
+					D2 + didx))
 				{
 					if ((u32)group < 32)
 						looped0 |= bit;
@@ -954,6 +978,10 @@ __device__ __forceinline__ void KernelStepBodyFused(const TKparams Kparams)
 		Kparams.Kangs[(kang_base + group) * 12 + 5] = tmp[1];
 		Kparams.Kangs[(kang_base + group) * 12 + 6] = tmp[2];
 		Kparams.Kangs[(kang_base + group) * 12 + 7] = tmp[3];
+		u64 didx = dist_base + (u64)group * dist_stride;
+		Kparams.Kangs[(kang_base + group) * 12 + 8] = D0[didx];
+		Kparams.Kangs[(kang_base + group) * 12 + 9] = D1[didx];
+		Kparams.Kangs[(kang_base + group) * 12 + 10] = D2[didx];
 	}
 }
 
