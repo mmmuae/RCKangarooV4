@@ -16,7 +16,7 @@
           "jmp_cnt": 512
         }
       ],
-      "kernels": ["KernelA", "KernelB", "KernelC", "KernelGen"],
+      "kernels": ["KernelA", "KernelB", "KernelStep_Main", "KernelStep_ExportWild", "KernelStep_ExportTame", "KernelStep_ExportBoth", "KernelC", "KernelGen"],
       "constant_symbols": ["jmp2_table"]
     },
     {
@@ -41,7 +41,7 @@
           "jmp_cnt": 512
         }
       ],
-      "kernels": ["KernelA", "KernelB", "KernelC", "KernelGen"],
+      "kernels": ["KernelA", "KernelB", "KernelStep_Main", "KernelStep_ExportWild", "KernelStep_ExportTame", "KernelStep_ExportBoth", "KernelC", "KernelGen"],
       "constant_symbols": ["jmp2_table"]
     }
   ],

@@ -84,7 +84,7 @@ __global__ void KernelA(const TKparams Kparams)
 		SAVE_VAL_256(L2y, tmp, group);
 	}
 
-	u32 L1S2 = Kparams.L1S2[BLOCK_X * BLOCK_SIZE + THREAD_X];
+	u64 L1S2 = Kparams.L1S2[BLOCK_X * BLOCK_SIZE + THREAD_X];
 
     for (int step_ind = 0; step_ind < STEP_CNT; step_ind++)
     {
@@ -159,11 +159,11 @@ __global__ void KernelA(const TKparams Kparams)
 			{
 				u32 jmp_next = x[0] % JMP_CNT;
 				jmp_next |= ((u32)y[0] & 1) ? 0 : INV_FLAG; //inverted
-				L1S2 |= (jmp_ind == jmp_next) ? (1u << group) : 0; //loop L1S2 detected
+				L1S2 |= (jmp_ind == jmp_next) ? (1ull << group) : 0; //loop L1S2 detected
 			}
 			else
 			{
-				L1S2 &= ~(1u << group);
+				L1S2 &= ~(1ull << group);
 				jmp_ind |= JMP2_FLAG;
 			}
 			
@@ -269,7 +269,7 @@ __global__ void KernelA(const TKparams Kparams)
 		SAVE_VAL_256_m(Ly, tmp, group);
 	}
 
-	u64 L1S2 = ((u64*)Kparams.L1S2)[BLOCK_X * BLOCK_SIZE + THREAD_X];
+	u64 L1S2 = Kparams.L1S2[BLOCK_X * BLOCK_SIZE + THREAD_X];
 	u64* jmp_table;
 	__align__(16) u64 jmp_x[4];
 	__align__(16) u64 jmp_y[4];
@@ -469,7 +469,7 @@ __global__ void KernelA(const TKparams Kparams)
 		}
 	}
 
-	((u64*)Kparams.L1S2)[BLOCK_X * BLOCK_SIZE + THREAD_X] = L1S2;
+	Kparams.L1S2[BLOCK_X * BLOCK_SIZE + THREAD_X] = L1S2;
 	//copy kangs from local to global
 	kang_ind = PNT_GROUP_CNT * (THREAD_X + BLOCK_X * BLOCK_SIZE);
 	for (u32 group = 0; group < PNT_GROUP_CNT; group++)
@@ -491,28 +491,70 @@ __global__ void KernelA(const TKparams Kparams)
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-__device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u64* d)
+__device__ __forceinline__ bool ReserveDpPosWarp(const TKparams& Kparams, u32* out_pos)
+{
+	unsigned int mask = __activemask();
+	if (!mask)
+		return false;
+	int lane = (int)(THREAD_X & 31u);
+	unsigned int lower = mask & ((lane == 0) ? 0u : ((1u << lane) - 1u));
+	u32 rank = (u32)__popc(lower);
+	u32 count = (u32)__popc(mask);
+	int leader = __ffs(mask) - 1;
+	u32 base = 0;
+	if (rank == 0)
+		base = atomicAdd(Kparams.DPs_out, count);
+	base = __shfl_sync(mask, base, leader);
+	u32 pos = base + rank;
+	if (pos >= MAX_DP_CNT)
+		return false;
+	*out_pos = pos;
+	return true;
+}
+
+template<u32 RUN_MODE>
+__device__ __forceinline__ void BuildDPFromTable(const TKparams& Kparams, int kang_ind, const u64* d)
 {
 	int ind = atomicAdd(Kparams.DPTable + kang_ind, 0x10000);
 	ind >>= 16;
 	if (ind >= DPTABLE_MAX_CNT)
 		return;
 	int4 rx = *(int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
-	u32 pos = atomicAdd(Kparams.DPs_out, 1);
-	pos = min(pos, MAX_DP_CNT - 1);
+	u32 pos = 0;
+	if (!ReserveDpPosWarp(Kparams, &pos))
+		return;
 	u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
 	*(int4*)&DPs[0] = rx;
-	*(int4*)&DPs[4] = ((int4*)d)[0];
+	*(int4*)&DPs[4] = ((const int4*)d)[0];
 	*(u64*)&DPs[8] = d[2];
-	if (Kparams.RunMode == KANG_MODE_EXPORT_WILD)
+	if constexpr (RUN_MODE == KANG_MODE_EXPORT_WILD)
 		DPs[10] = (kang_ind < (Kparams.KangCnt / 2)) ? WILD1 : WILD2;
-	else if ((Kparams.RunMode == KANG_MODE_GEN_TAME) || (Kparams.RunMode == KANG_MODE_EXPORT_TAME))
+	else if constexpr ((RUN_MODE == KANG_MODE_GEN_TAME) || (RUN_MODE == KANG_MODE_EXPORT_TAME))
 		DPs[10] = TAME;
 	else
 		DPs[10] = 3 * kang_ind / Kparams.KangCnt; //kang type
 }
 
-__device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
+template<u32 RUN_MODE>
+__device__ __forceinline__ void EmitDPFromPoint(const TKparams& Kparams, u32 kang_ind, const u64* x, const u64* d)
+{
+	u32 pos = 0;
+	if (!ReserveDpPosWarp(Kparams, &pos))
+		return;
+	u32* DPs = Kparams.DPs_out + 4 + pos * GPU_DP_SIZE / 4;
+	((int4*)&DPs[0])[0] = ((const int4*)x)[0];
+	((int4*)&DPs[4])[0] = ((const int4*)d)[0];
+	*(u64*)&DPs[8] = d[2];
+	if constexpr (RUN_MODE == KANG_MODE_EXPORT_WILD)
+		DPs[10] = (kang_ind < (Kparams.KangCnt / 2)) ? WILD1 : WILD2;
+	else if constexpr ((RUN_MODE == KANG_MODE_GEN_TAME) || (RUN_MODE == KANG_MODE_EXPORT_TAME))
+		DPs[10] = TAME;
+	else
+		DPs[10] = 3 * kang_ind / Kparams.KangCnt;
+}
+
+template<u32 RUN_MODE>
+__device__ __forceinline__ bool ProcessJumpDistanceLegacy(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
 {
 	u64* jmp_d = (d_cur & JMP2_FLAG) ? jmp2_d : jmp1_d;
 
@@ -549,7 +591,7 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 	if (found_ind < 0)
 	{		
 		if (d_cur & DP_FLAG)
-			BuildDP(Kparams, kang_ind, d);
+			BuildDPFromTable<RUN_MODE>(Kparams, kang_ind, d);
 		return false;
 	}
 
@@ -565,14 +607,14 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 	return true;
 }
 
-#define DO_ITER(iter) {\
+#define DO_ITER_LEGACY(run_mode, iter) {\
 	u32 cur_dAB = jlist[THREAD_X]; \
 	u16 cur_dA = cur_dAB & 0xFFFF; \
 	u16 cur_dB = cur_dAB >> 16; \
 	if (!LoopedA) \
-		LoopedA = ProcessJumpDistance(step_ind, cur_dA, dA, kang_ind, jmp1_d, jmp2_d, Kparams, RegsA, &cur_indA, iter); \
+		LoopedA = ProcessJumpDistanceLegacy<run_mode>(step_ind, cur_dA, dA, kang_ind, jmp1_d, jmp2_d, Kparams, RegsA, &cur_indA, iter); \
 	if (!LoopedB) \
-		LoopedB = ProcessJumpDistance(step_ind, cur_dB, dB, kang_ind + 1, jmp1_d, jmp2_d, Kparams, RegsB, &cur_indB, iter); \
+		LoopedB = ProcessJumpDistanceLegacy<run_mode>(step_ind, cur_dB, dB, kang_ind + 1, jmp1_d, jmp2_d, Kparams, RegsB, &cur_indB, iter); \
 	jlist += BLOCK_SIZE * PNT_GROUP_CNT / 2; \
 	step_ind++; \
 }
@@ -585,8 +627,8 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 // Since we lose kangs gradually, for a year we lose 0.19/2 = 0.1% of speed, so you should catch L1S12 only if you are going to solve same point for decades.
 // Or you can check all kangs for L1S12 on CPU once a day and restart looped kangs.
 // Level2 loops are very rare and they have even size too so they will be handled by the same code. We don't know what loop level we catch so we use JmpTable3 for escaping.
-extern "C" __launch_bounds__(BLOCK_SIZE, 1)
-__global__ void KernelB(const TKparams Kparams)
+template<u32 RUN_MODE>
+__device__ __forceinline__ void KernelReplayBody(const TKparams Kparams)
 {
 	u64* jmp1_d = LDS; //16KB, 192bit jumps
 	u64* jmp2_d = LDS + 4 * JMP_CNT; //16KB, 192bit jumps
@@ -616,8 +658,8 @@ __global__ void KernelB(const TKparams Kparams)
 		#pragma unroll
 		for (int i = 0; i < MD_LEN; i++)
 		{
-			RegsA[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + i * BLOCK_SIZE + BLOCK_X];
-			RegsB[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (i + MD_LEN) * BLOCK_SIZE + BLOCK_X];
+			RegsA[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + i * BLOCK_SIZE + THREAD_X];
+			RegsB[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (i + MD_LEN) * BLOCK_SIZE + THREAD_X];
 		}
 		u32 cur_indA = 0;
 		u32 cur_indB = 0;
@@ -647,16 +689,16 @@ __global__ void KernelB(const TKparams Kparams)
 		u32 step_ind = 0;
 		while (step_ind < STEP_CNT)
 		{
-			DO_ITER(0);
-			DO_ITER(1);
-			DO_ITER(2);
-			DO_ITER(3);
-			DO_ITER(4);
-			DO_ITER(5);
-			DO_ITER(6);
-			DO_ITER(7);
-			DO_ITER(8);
-			DO_ITER(9);
+			DO_ITER_LEGACY(RUN_MODE, 0);
+			DO_ITER_LEGACY(RUN_MODE, 1);
+			DO_ITER_LEGACY(RUN_MODE, 2);
+			DO_ITER_LEGACY(RUN_MODE, 3);
+			DO_ITER_LEGACY(RUN_MODE, 4);
+			DO_ITER_LEGACY(RUN_MODE, 5);
+			DO_ITER_LEGACY(RUN_MODE, 6);
+			DO_ITER_LEGACY(RUN_MODE, 7);
+			DO_ITER_LEGACY(RUN_MODE, 8);
+			DO_ITER_LEGACY(RUN_MODE, 9);
 		}
 
 		Kparams.Kangs[kang_ind * 12 + 8] = dA[0];
@@ -671,11 +713,279 @@ __global__ void KernelB(const TKparams Kparams)
 		for (int i = 0; i < MD_LEN; i++)
 		{
 			int ind = (i + MD_LEN - cur_indA) % MD_LEN;
-			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + ind * BLOCK_SIZE + BLOCK_X] = RegsA[i];
+			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + ind * BLOCK_SIZE + THREAD_X] = RegsA[i];
 			ind = (i + MD_LEN - cur_indB) % MD_LEN;
-			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (ind + MD_LEN) * BLOCK_SIZE + BLOCK_X] = RegsB[i];
+			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (ind + MD_LEN) * BLOCK_SIZE + THREAD_X] = RegsB[i];
 		}
 	}
+}
+
+template<u32 RUN_MODE>
+__device__ __forceinline__ bool ProcessFusedDistanceAndLoop(
+	const TKparams& Kparams,
+	u32 step_ind,
+	u16 jmp_flags,
+	u32 kang_ind,
+	const u64* x_after)
+{
+	u64* d_ptr = Kparams.Kangs + (u64)kang_ind * 12 + 8;
+	__align__(16) u64 d[3];
+	d[0] = d_ptr[0];
+	d[1] = d_ptr[1];
+	d[2] = d_ptr[2];
+
+	const u64* jmp_tbl = (jmp_flags & JMP2_FLAG) ? Kparams.Jumps2 : Kparams.Jumps1;
+	const u64* jmp_d = jmp_tbl + (u64)(jmp_flags & JMP_MASK) * 12 + 8;
+	__align__(16) u64 jmp[3];
+	jmp[0] = jmp_d[0];
+	jmp[1] = jmp_d[1];
+	jmp[2] = jmp_d[2];
+
+	if (jmp_flags & INV_FLAG)
+		Sub192from192(d, jmp)
+	else
+		Add192to192(d, jmp);
+
+	d_ptr[0] = d[0];
+	d_ptr[1] = d[1];
+	d_ptr[2] = d[2];
+
+	const u32 iter = step_ind % MD_LEN;
+	u64* table = Kparams.LoopTable + (u64)kang_ind * MD_LEN;
+	int found_ind = (int)iter + MD_LEN - 4;
+	while (1)
+	{
+		if (table[found_ind % MD_LEN] == d[0])
+			break;
+		found_ind -= 2;
+		if (table[found_ind % MD_LEN] == d[0])
+			break;
+		found_ind -= 2;
+		if (table[found_ind % MD_LEN] == d[0])
+			break;
+		found_ind = (int)iter;
+		if (table[found_ind] == d[0])
+			break;
+		found_ind = -1;
+		break;
+	}
+	table[iter] = d[0];
+
+	if (found_ind < 0)
+	{
+		if (jmp_flags & DP_FLAG)
+			EmitDPFromPoint<RUN_MODE>(Kparams, kang_ind, x_after, d);
+		return false;
+	}
+
+	u32 loop_size = (iter + MD_LEN - (u32)found_ind) % MD_LEN;
+	if (!loop_size)
+		loop_size = MD_LEN;
+	atomicAdd(Kparams.dbg_buf + loop_size, 1);
+
+	u32 ind_last = MD_LEN - 1 - ((STEP_CNT - 1 - step_ind) % loop_size);
+	u32 ind = atomicAdd(Kparams.LoopedKangs, 1);
+	Kparams.LoopedKangs[2 + ind] = kang_ind | (ind_last << 28);
+	return true;
+}
+
+template<u32 RUN_MODE>
+__device__ __forceinline__ void KernelStepBodyFused(const TKparams Kparams)
+{
+	u64* L2x = Kparams.L2 + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_X;
+	u64* L2y = L2x + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
+	u64* L2s = L2y + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
+	u64* x_last0 = Kparams.LastPnts + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_X;
+	u64* y_last0 = x_last0 + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
+
+	u64* jmp1_table = LDS;
+	int i = THREAD_X;
+	while (i < JMP_CNT)
+	{
+		*(int4*)&jmp1_table[8 * i + 0] = *(int4*)&Kparams.Jumps1[12 * i + 0];
+		*(int4*)&jmp1_table[8 * i + 2] = *(int4*)&Kparams.Jumps1[12 * i + 2];
+		*(int4*)&jmp1_table[8 * i + 4] = *(int4*)&Kparams.Jumps1[12 * i + 4];
+		*(int4*)&jmp1_table[8 * i + 6] = *(int4*)&Kparams.Jumps1[12 * i + 6];
+		i += BLOCK_SIZE;
+	}
+	__syncthreads();
+
+	__align__(16) u64 x[4], y[4], tmp[4], tmp2[4];
+	u64 dp_mask64 = ~((1ull << (64 - Kparams.DP)) - 1);
+	u32 kang_base = PNT_GROUP_CNT * (THREAD_X + BLOCK_X * BLOCK_SIZE);
+
+	for (u32 group = 0; group < PNT_GROUP_CNT; group++)
+	{
+		tmp[0] = Kparams.Kangs[(kang_base + group) * 12 + 0];
+		tmp[1] = Kparams.Kangs[(kang_base + group) * 12 + 1];
+		tmp[2] = Kparams.Kangs[(kang_base + group) * 12 + 2];
+		tmp[3] = Kparams.Kangs[(kang_base + group) * 12 + 3];
+		SAVE_VAL_256(L2x, tmp, group);
+		tmp[0] = Kparams.Kangs[(kang_base + group) * 12 + 4];
+		tmp[1] = Kparams.Kangs[(kang_base + group) * 12 + 5];
+		tmp[2] = Kparams.Kangs[(kang_base + group) * 12 + 6];
+		tmp[3] = Kparams.Kangs[(kang_base + group) * 12 + 7];
+		SAVE_VAL_256(L2y, tmp, group);
+	}
+
+	u64 L1S2 = Kparams.L1S2[BLOCK_X * BLOCK_SIZE + THREAD_X];
+	u32 looped0 = 0;
+	u32 looped1 = 0;
+
+	for (u32 step_ind = 0; step_ind < STEP_CNT; step_ind++)
+	{
+		__align__(16) u64 inverse[5];
+		__align__(16) u64 jmp_x[4];
+		__align__(16) u64 jmp_y[4];
+		u64* jmp_table;
+		u16 jmp_ind;
+
+		LOAD_VAL_256(x, L2x, 0);
+		jmp_ind = x[0] % JMP_CNT;
+		jmp_table = ((L1S2 >> 0) & 1) ? jmp2_table : jmp1_table;
+		Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
+		SubModP(inverse, x, jmp_x);
+		SAVE_VAL_256(L2s, inverse, 0);
+		for (u32 group = 1; group < PNT_GROUP_CNT; group++)
+		{
+			LOAD_VAL_256(x, L2x, group);
+			jmp_ind = x[0] % JMP_CNT;
+			jmp_table = ((L1S2 >> group) & 1) ? jmp2_table : jmp1_table;
+			Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
+			SubModP(tmp, x, jmp_x);
+			MulModP(inverse, inverse, tmp);
+			SAVE_VAL_256(L2s, inverse, group);
+		}
+		InvModP((u32*)inverse);
+
+		for (int group = PNT_GROUP_CNT - 1; group >= 0; group--)
+		{
+			__align__(16) u64 x0[4];
+			__align__(16) u64 y0[4];
+			__align__(16) u64 dxs[4];
+
+			LOAD_VAL_256(x0, L2x, group);
+			LOAD_VAL_256(y0, L2y, group);
+			jmp_ind = x0[0] % JMP_CNT;
+			jmp_table = ((L1S2 >> group) & 1) ? jmp2_table : jmp1_table;
+			Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
+			Copy_int4_x2(jmp_y, jmp_table + 8 * jmp_ind + 4);
+			u16 d_cur = jmp_ind;
+			u32 inv_flag = (u32)y0[0] & 1;
+			if (inv_flag)
+			{
+				d_cur |= INV_FLAG;
+				NegModP(jmp_y);
+			}
+			if (group)
+			{
+				LOAD_VAL_256(tmp, L2s, group - 1);
+				SubModP(tmp2, x0, jmp_x);
+				MulModP(dxs, tmp, inverse);
+				MulModP(inverse, inverse, tmp2);
+			}
+			else
+			{
+				Copy_u64_x4(dxs, inverse);
+			}
+
+			SubModP(tmp2, y0, jmp_y);
+			MulModP(tmp, tmp2, dxs);
+			SqrModP(tmp2, tmp);
+
+			SubModP(x, tmp2, jmp_x);
+			SubModP(x, x, x0);
+			SAVE_VAL_256(L2x, x, group);
+
+			SubModP(y, x0, x);
+			MulModP(y, y, tmp);
+			SubModP(y, y, y0);
+			SAVE_VAL_256(L2y, y, group);
+
+			if (((L1S2 >> group) & 1) == 0)
+			{
+				u32 jmp_next = x[0] % JMP_CNT;
+				jmp_next |= ((u32)y[0] & 1) ? 0 : INV_FLAG;
+				L1S2 |= (d_cur == jmp_next) ? (1ull << group) : 0;
+			}
+			else
+			{
+				L1S2 &= ~(1ull << group);
+				d_cur |= JMP2_FLAG;
+			}
+			if ((x[3] & dp_mask64) == 0)
+				d_cur |= DP_FLAG;
+
+			const u32 bit = (u32)group < 32 ? (1u << group) : (1u << ((u32)group - 32));
+			const bool is_looped = ((u32)group < 32) ? ((looped0 & bit) != 0) : ((looped1 & bit) != 0);
+			if (!is_looped)
+			{
+				u32 kang_ind = kang_base + (u32)group;
+				if (ProcessFusedDistanceAndLoop<RUN_MODE>(Kparams, step_ind, d_cur, kang_ind, x))
+				{
+					if ((u32)group < 32)
+						looped0 |= bit;
+					else
+						looped1 |= bit;
+				}
+			}
+
+			if (step_ind + MD_LEN >= STEP_CNT)
+			{
+				int n = step_ind + MD_LEN - STEP_CNT;
+				u64* x_last = x_last0 + n * 2 * (4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE);
+				u64* y_last = y_last0 + n * 2 * (4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE);
+				SAVE_VAL_256(x_last, x, group);
+				SAVE_VAL_256(y_last, y, group);
+			}
+		}
+	}
+
+	Kparams.L1S2[BLOCK_X * BLOCK_SIZE + THREAD_X] = L1S2;
+	for (u32 group = 0; group < PNT_GROUP_CNT; group++)
+	{
+		LOAD_VAL_256(tmp, L2x, group);
+		Kparams.Kangs[(kang_base + group) * 12 + 0] = tmp[0];
+		Kparams.Kangs[(kang_base + group) * 12 + 1] = tmp[1];
+		Kparams.Kangs[(kang_base + group) * 12 + 2] = tmp[2];
+		Kparams.Kangs[(kang_base + group) * 12 + 3] = tmp[3];
+		LOAD_VAL_256(tmp, L2y, group);
+		Kparams.Kangs[(kang_base + group) * 12 + 4] = tmp[0];
+		Kparams.Kangs[(kang_base + group) * 12 + 5] = tmp[1];
+		Kparams.Kangs[(kang_base + group) * 12 + 6] = tmp[2];
+		Kparams.Kangs[(kang_base + group) * 12 + 7] = tmp[3];
+	}
+}
+
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
+__global__ void KernelStep_Main(const TKparams Kparams)
+{
+	KernelStepBodyFused<KANG_MODE_MAIN>(Kparams);
+}
+
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
+__global__ void KernelStep_ExportWild(const TKparams Kparams)
+{
+	KernelStepBodyFused<KANG_MODE_EXPORT_WILD>(Kparams);
+}
+
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
+__global__ void KernelStep_ExportTame(const TKparams Kparams)
+{
+	KernelStepBodyFused<KANG_MODE_EXPORT_TAME>(Kparams);
+}
+
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
+__global__ void KernelStep_ExportBoth(const TKparams Kparams)
+{
+	KernelStepBodyFused<KANG_MODE_EXPORT_BOTH>(Kparams);
+}
+
+// Legacy entrypoint kept for rollback compatibility.
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
+__global__ void KernelB(const TKparams Kparams)
+{
+	KernelReplayBody<KANG_MODE_MAIN>(Kparams);
 }
 
 //this kernel performes single jump3 for looped kangs
@@ -770,11 +1080,7 @@ __global__ void KernelC(const TKparams Kparams)
 		Kparams.Kangs[kang_ind * 12 + 9] = d[1];
 		Kparams.Kangs[kang_ind * 12 + 10] = d[2];
 
-#ifndef OLD_GPU
-		atomicAnd(&Kparams.L1S2[block_ind * BLOCK_SIZE + thr_ind], ~(1u << gr_ind));
-#else
-		atomicAnd(&((u64*)Kparams.L1S2)[block_ind * BLOCK_SIZE + thr_ind], ~(1ull << gr_ind));
-#endif
+		atomicAnd(&Kparams.L1S2[block_ind * BLOCK_SIZE + thr_ind], ~(1ull << gr_ind));
 	}
 }
 

@@ -85,6 +85,7 @@ Advanced SASS runtime envs:
 <code>RCK_BLOCK_SIZE</code> (launch block size override, diagnostics/tuning),
 <code>RCK_GROUP_CNT</code> and <code>RCK_BLOCKCNT_MUL</code> for launch profile tuning.
 <code>RCK_SASS_STRICT</code> (default <code>1</code>): read compile-time contract symbols from cubin and lock runtime launch geometry to that contract; set to <code>0</code> only for diagnostics.
+<code>RCK_SASS_LEGACY_AB</code> (optional): force legacy KernelA+KernelB path for rollback comparison; default launch uses mode-specialized <code>KernelStep_*</code>.
 Default SM120 profile in this branch is <code>b256g24</code>; build and select other variants explicitly when benchmarking.
 
 Benchmark script:
@@ -107,6 +108,7 @@ Example:
 
 DP export benchmark matrix:
 <code>scripts/bench_dpf_matrix.sh</code> runs timed mode/variant sweeps and reports speed with WDP type mix.
+<code>scripts/bench_step_matrix.sh</code> runs main + export mode matrix with speed/Err extraction and WDP type validation.
 
 Compatibility aliases:
 <code>-dp-export</code> -> <code>-dpf-mode</code>,

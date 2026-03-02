@@ -570,8 +570,13 @@ bool RCGpuKang::InitSassBackend(const u64* jmp2_table)
 	SassModule = nullptr;
 	SassKernelA = nullptr;
 	SassKernelB = nullptr;
+	SassKernelStepMain = nullptr;
+	SassKernelStepWild = nullptr;
+	SassKernelStepTame = nullptr;
+	SassKernelStepBoth = nullptr;
 	SassKernelC = nullptr;
 	SassKernelGen = nullptr;
+	UseLegacyStepKernel = false;
 
 	if (!jmp2_table)
 	{
@@ -674,9 +679,51 @@ bool RCGpuKang::InitSassBackend(const u64* jmp2_table)
 	cu_err = cuModuleGetFunction(&SassKernelB, SassModule, "KernelB");
 	if (cu_err != CUDA_SUCCESS)
 	{
-		char errbuf[256];
-		FormatCuError(cu_err, errbuf, sizeof(errbuf));
-		SetBackendError("cuModuleGetFunction(KernelB) failed: %s", errbuf);
+		SassKernelB = nullptr;
+	}
+	cu_err = cuModuleGetFunction(&SassKernelStepMain, SassModule, "KernelStep_Main");
+	if (cu_err != CUDA_SUCCESS)
+	{
+		SassKernelStepMain = nullptr;
+	}
+	cu_err = cuModuleGetFunction(&SassKernelStepWild, SassModule, "KernelStep_ExportWild");
+	if (cu_err != CUDA_SUCCESS)
+	{
+		SassKernelStepWild = nullptr;
+	}
+	cu_err = cuModuleGetFunction(&SassKernelStepTame, SassModule, "KernelStep_ExportTame");
+	if (cu_err != CUDA_SUCCESS)
+	{
+		SassKernelStepTame = nullptr;
+	}
+	cu_err = cuModuleGetFunction(&SassKernelStepBoth, SassModule, "KernelStep_ExportBoth");
+	if (cu_err != CUDA_SUCCESS)
+	{
+		SassKernelStepBoth = nullptr;
+	}
+	UseLegacyStepKernel = (SassKernelStepMain == nullptr) || (SassKernelStepWild == nullptr) ||
+		(SassKernelStepTame == nullptr) || (SassKernelStepBoth == nullptr);
+	if (UseLegacyStepKernel && !SassKernelB)
+	{
+		SetBackendError("cubin misses both KernelStep_* and legacy KernelB symbols");
+		ReleaseBackend();
+		return false;
+	}
+	if (UseLegacyStepKernel)
+	{
+		printf("GPU %d: warning: missing KernelStep_* symbols, falling back to legacy KernelA+KernelB path\r\n", CudaIndex);
+	}
+	if (IsEnvSet("RCK_SASS_LEGACY_AB"))
+	{
+		UseLegacyStepKernel = true;
+	}
+	if (IsOldGpu)
+	{
+		UseLegacyStepKernel = true;
+	}
+	if (UseLegacyStepKernel && !SassKernelB)
+	{
+		SetBackendError("legacy step path requested but KernelB symbol is missing");
 		ReleaseBackend();
 		return false;
 	}
@@ -699,57 +746,71 @@ bool RCGpuKang::InitSassBackend(const u64* jmp2_table)
 		return false;
 	}
 
-	cu_err = cuFuncSetAttribute(SassKernelA, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, (int)Kparams.KernelA_LDS_Size);
-	if (cu_err != CUDA_SUCCESS)
+	auto set_dyn_smem = [&](CUfunction fn, int bytes, const char* name) -> bool
 	{
+		CUresult rc = cuFuncSetAttribute(fn, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, bytes);
+		if (rc == CUDA_SUCCESS)
+			return true;
 		char errbuf[256];
-		FormatCuError(cu_err, errbuf, sizeof(errbuf));
-		SetBackendError("cuFuncSetAttribute(KernelA) failed: %s", errbuf);
+		FormatCuError(rc, errbuf, sizeof(errbuf));
+		SetBackendError("cuFuncSetAttribute(%s) failed: %s", name, errbuf);
+		return false;
+	};
+
+	if (!set_dyn_smem(SassKernelA, (int)Kparams.KernelA_LDS_Size, "KernelA"))
+	{
 		ReleaseBackend();
 		return false;
 	}
-	cu_err = cuFuncSetAttribute(SassKernelB, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, (int)Kparams.KernelB_LDS_Size);
-	if (cu_err != CUDA_SUCCESS)
+	if (UseLegacyStepKernel)
 	{
-		char errbuf[256];
-		FormatCuError(cu_err, errbuf, sizeof(errbuf));
-		SetBackendError("cuFuncSetAttribute(KernelB) failed: %s", errbuf);
-		ReleaseBackend();
-		return false;
+		if (!set_dyn_smem(SassKernelB, (int)Kparams.KernelB_LDS_Size, "KernelB"))
+		{
+			ReleaseBackend();
+			return false;
+		}
 	}
-	cu_err = cuFuncSetAttribute(SassKernelC, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, (int)Kparams.KernelC_LDS_Size);
-	if (cu_err != CUDA_SUCCESS)
+	else
 	{
-		char errbuf[256];
-		FormatCuError(cu_err, errbuf, sizeof(errbuf));
-		SetBackendError("cuFuncSetAttribute(KernelC) failed: %s", errbuf);
+		if (!set_dyn_smem(SassKernelStepMain, (int)Kparams.KernelStep_LDS_Size, "KernelStep_Main") ||
+			!set_dyn_smem(SassKernelStepWild, (int)Kparams.KernelStep_LDS_Size, "KernelStep_ExportWild") ||
+			!set_dyn_smem(SassKernelStepTame, (int)Kparams.KernelStep_LDS_Size, "KernelStep_ExportTame") ||
+			!set_dyn_smem(SassKernelStepBoth, (int)Kparams.KernelStep_LDS_Size, "KernelStep_ExportBoth"))
+		{
+			ReleaseBackend();
+			return false;
+		}
+	}
+	if (!set_dyn_smem(SassKernelC, (int)Kparams.KernelC_LDS_Size, "KernelC"))
+	{
 		ReleaseBackend();
 		return false;
 	}
 
 	// Favor shared memory when hardware supports carveout tuning.
 	const int shared_carveout = 100;
-	CUresult carve_rc = cuFuncSetAttribute(SassKernelA, CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, shared_carveout);
-	if (carve_rc != CUDA_SUCCESS)
+	auto set_carveout_hint = [&](CUfunction fn, const char* name)
 	{
+		CUresult rc = cuFuncSetAttribute(fn, CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, shared_carveout);
+		if (rc == CUDA_SUCCESS)
+			return;
 		char errbuf[256];
-		FormatCuError(carve_rc, errbuf, sizeof(errbuf));
-		printf("GPU %d: warning: KernelA shared carveout hint failed: %s\r\n", CudaIndex, errbuf);
-	}
-	carve_rc = cuFuncSetAttribute(SassKernelB, CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, shared_carveout);
-	if (carve_rc != CUDA_SUCCESS)
+		FormatCuError(rc, errbuf, sizeof(errbuf));
+		printf("GPU %d: warning: %s shared carveout hint failed: %s\r\n", CudaIndex, name, errbuf);
+	};
+	set_carveout_hint(SassKernelA, "KernelA");
+	if (UseLegacyStepKernel)
 	{
-		char errbuf[256];
-		FormatCuError(carve_rc, errbuf, sizeof(errbuf));
-		printf("GPU %d: warning: KernelB shared carveout hint failed: %s\r\n", CudaIndex, errbuf);
+		set_carveout_hint(SassKernelB, "KernelB");
 	}
-	carve_rc = cuFuncSetAttribute(SassKernelC, CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT, shared_carveout);
-	if (carve_rc != CUDA_SUCCESS)
+	else
 	{
-		char errbuf[256];
-		FormatCuError(carve_rc, errbuf, sizeof(errbuf));
-		printf("GPU %d: warning: KernelC shared carveout hint failed: %s\r\n", CudaIndex, errbuf);
+		set_carveout_hint(SassKernelStepMain, "KernelStep_Main");
+		set_carveout_hint(SassKernelStepWild, "KernelStep_ExportWild");
+		set_carveout_hint(SassKernelStepTame, "KernelStep_ExportTame");
+		set_carveout_hint(SassKernelStepBoth, "KernelStep_ExportBoth");
 	}
+	set_carveout_hint(SassKernelC, "KernelC");
 
 	CUdeviceptr jmp2_sym = 0;
 	size_t jmp2_sym_size = 0;
@@ -804,6 +865,10 @@ void RCGpuKang::ReleaseBackend()
 	}
 	SassKernelA = nullptr;
 	SassKernelB = nullptr;
+	SassKernelStepMain = nullptr;
+	SassKernelStepWild = nullptr;
+	SassKernelStepTame = nullptr;
+	SassKernelStepBoth = nullptr;
 	SassKernelC = nullptr;
 	SassKernelGen = nullptr;
 }
@@ -829,39 +894,77 @@ cudaError_t RCGpuKang::LaunchKernelGen()
 	return cudaSuccess;
 }
 
-cudaError_t RCGpuKang::LaunchKernelABC()
+cudaError_t RCGpuKang::LaunchKernelStepMode()
 {
 	void* args[] = { &Kparams };
-	CUresult cu_err = cuLaunchKernel(
-		SassKernelA,
-		Kparams.BlockCnt, 1, 1,
-		Kparams.BlockSize, 1, 1,
-		Kparams.KernelA_LDS_Size,
-		(CUstream)ExecStream,
-		args,
-		0);
-	if (cu_err != CUDA_SUCCESS)
+	CUresult cu_err = CUDA_SUCCESS;
+	if (UseLegacyStepKernel)
 	{
-		char errbuf[256];
-		FormatCuError(cu_err, errbuf, sizeof(errbuf));
-		printf("GPU %d, SASS KernelA launch failed: %s\r\n", CudaIndex, errbuf);
-		return cudaErrorUnknown;
+		cu_err = cuLaunchKernel(
+			SassKernelA,
+			Kparams.BlockCnt, 1, 1,
+			Kparams.BlockSize, 1, 1,
+			Kparams.KernelA_LDS_Size,
+			(CUstream)ExecStream,
+			args,
+			0);
+		if (cu_err != CUDA_SUCCESS)
+		{
+			char errbuf[256];
+			FormatCuError(cu_err, errbuf, sizeof(errbuf));
+			printf("GPU %d, SASS KernelA launch failed: %s\r\n", CudaIndex, errbuf);
+			return cudaErrorUnknown;
+		}
+		cu_err = cuLaunchKernel(
+			SassKernelB,
+			Kparams.BlockCnt, 1, 1,
+			Kparams.BlockSize, 1, 1,
+			Kparams.KernelB_LDS_Size,
+			(CUstream)ExecStream,
+			args,
+			0);
+		if (cu_err != CUDA_SUCCESS)
+		{
+			char errbuf[256];
+			FormatCuError(cu_err, errbuf, sizeof(errbuf));
+			printf("GPU %d, SASS KernelB launch failed: %s\r\n", CudaIndex, errbuf);
+			return cudaErrorUnknown;
+		}
 	}
-
-	cu_err = cuLaunchKernel(
-		SassKernelB,
-		Kparams.BlockCnt, 1, 1,
-		Kparams.BlockSize, 1, 1,
-		Kparams.KernelB_LDS_Size,
-		(CUstream)ExecStream,
-		args,
-		0);
-	if (cu_err != CUDA_SUCCESS)
+	else
 	{
-		char errbuf[256];
-		FormatCuError(cu_err, errbuf, sizeof(errbuf));
-		printf("GPU %d, SASS KernelB launch failed: %s\r\n", CudaIndex, errbuf);
-		return cudaErrorUnknown;
+		CUfunction step_kernel = SassKernelStepMain;
+		const char* step_name = "KernelStep_Main";
+		if (Kparams.RunMode == KANG_MODE_EXPORT_WILD)
+		{
+			step_kernel = SassKernelStepWild;
+			step_name = "KernelStep_ExportWild";
+		}
+		else if (Kparams.RunMode == KANG_MODE_EXPORT_TAME)
+		{
+			step_kernel = SassKernelStepTame;
+			step_name = "KernelStep_ExportTame";
+		}
+		else if (Kparams.RunMode == KANG_MODE_EXPORT_BOTH)
+		{
+			step_kernel = SassKernelStepBoth;
+			step_name = "KernelStep_ExportBoth";
+		}
+		cu_err = cuLaunchKernel(
+			step_kernel,
+			Kparams.BlockCnt, 1, 1,
+			Kparams.BlockSize, 1, 1,
+			Kparams.KernelStep_LDS_Size,
+			(CUstream)ExecStream,
+			args,
+			0);
+		if (cu_err != CUDA_SUCCESS)
+		{
+			char errbuf[256];
+			FormatCuError(cu_err, errbuf, sizeof(errbuf));
+			printf("GPU %d, SASS %s launch failed: %s\r\n", CudaIndex, step_name, errbuf);
+			return cudaErrorUnknown;
+		}
 	}
 
 	cu_err = cuLaunchKernel(
@@ -907,6 +1010,10 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	SassModule = nullptr;
 	SassKernelA = nullptr;
 	SassKernelB = nullptr;
+	SassKernelStepMain = nullptr;
+	SassKernelStepWild = nullptr;
+	SassKernelStepTame = nullptr;
+	SassKernelStepBoth = nullptr;
 	SassKernelC = nullptr;
 	SassKernelGen = nullptr;
 	BackendError[0] = 0;
@@ -919,6 +1026,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	LaunchStrictMode = true;
 	LaunchEnvBlockSet = false;
 	LaunchEnvGroupSet = false;
+	UseLegacyStepKernel = false;
 
 	auto FailPrepare = [&]() -> bool
 	{
@@ -1069,6 +1177,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	Kparams.DP = DP;
 	Kparams.KernelA_LDS_Size = 64 * JMP_CNT + 16 * Kparams.BlockSize;
 	Kparams.KernelB_LDS_Size = 64 * JMP_CNT;
+	Kparams.KernelStep_LDS_Size = 64 * JMP_CNT;
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
 
 //allocate gpu mem
@@ -1149,14 +1258,6 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return FailPrepare();
 	}
 
-	size = 2 * (u64)KangCnt * STEP_CNT;
-	total_mem += size;
-	err = cudaMalloc((void**)&Kparams.JumpsList, size);
-	if (err != cudaSuccess)
-	{
-		printf("GPU %d Allocate JumpsList memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
-		return FailPrepare();
-	}
 
 	size = (u64)KangCnt * (16 * DPTABLE_MAX_CNT + sizeof(u32)); //we store 16bytes of X
 	total_mem += size;
@@ -1265,6 +1366,17 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		printf("GPU %d, SASS backend init failed: %s\r\n", CudaIndex, BackendError[0] ? BackendError : "unknown");
 		return FailPrepare();
 	}
+	if (UseLegacyStepKernel && !Kparams.JumpsList)
+	{
+		size = 2 * (u64)KangCnt * STEP_CNT;
+		total_mem += size;
+		err = cudaMalloc((void**)&Kparams.JumpsList, size);
+		if (err != cudaSuccess)
+		{
+			printf("GPU %d Allocate JumpsList memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
+			return FailPrepare();
+		}
+	}
 //jmp3
 	std::vector<u64> jmp3_buf(JMP_CNT * 12);
 	for (int i = 0; i < JMP_CNT; i++)
@@ -1281,6 +1393,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	}
 
 	printf("GPU %d: backend=sass, cubin=%s\r\n", CudaIndex, LoadedSassPath);
+	printf("GPU %d: step path=%s\r\n", CudaIndex, UseLegacyStepKernel ? "legacy-ab" : "fused-step");
 	printf("GPU %d: launch profile blocks=%u block_size=%u groups=%u (SM %d.%d)\r\n",
 		CudaIndex,
 		Kparams.BlockCnt,
@@ -1551,11 +1664,14 @@ void RCGpuKang::Execute()
 			gTotalErrors.fetch_add(1, std::memory_order_relaxed);
 			break;
 		}
-		err = cudaMemsetAsync(Kparams.DPTable, 0, KangCnt * sizeof(u32), ExecStream);
-		if (err != cudaSuccess)
+		if (UseLegacyStepKernel)
 		{
-			gTotalErrors.fetch_add(1, std::memory_order_relaxed);
-			break;
+			err = cudaMemsetAsync(Kparams.DPTable, 0, KangCnt * sizeof(u32), ExecStream);
+			if (err != cudaSuccess)
+			{
+				gTotalErrors.fetch_add(1, std::memory_order_relaxed);
+				break;
+			}
 		}
 		err = cudaMemsetAsync(Kparams.LoopedKangs, 0, 8, ExecStream);
 		if (err != cudaSuccess)
@@ -1563,10 +1679,10 @@ void RCGpuKang::Execute()
 			gTotalErrors.fetch_add(1, std::memory_order_relaxed);
 			break;
 		}
-		err = LaunchKernelABC();
+		err = LaunchKernelStepMode();
 		if (err != cudaSuccess)
 		{
-			printf("GPU %d, LaunchKernelABC failed: %s\r\n", CudaIndex, cudaGetErrorString(err));
+			printf("GPU %d, LaunchKernelStepMode failed: %s\r\n", CudaIndex, cudaGetErrorString(err));
 			gTotalErrors.fetch_add(1, std::memory_order_relaxed);
 			break;
 		}

@@ -56,8 +56,13 @@ private:
 	CUmodule SassModule;
 	CUfunction SassKernelA;
 	CUfunction SassKernelB;
+	CUfunction SassKernelStepMain;
+	CUfunction SassKernelStepWild;
+	CUfunction SassKernelStepTame;
+	CUfunction SassKernelStepBoth;
 	CUfunction SassKernelC;
 	CUfunction SassKernelGen;
+	bool UseLegacyStepKernel;
 	u32 DpCountHost;
 	bool DpBufferPinned;
 	char BackendError[256];
@@ -76,7 +81,7 @@ private:
 	bool InitSassBackend(const u64* jmp2_table);
 	void ReleaseBackend();
 	cudaError_t LaunchKernelGen();
-	cudaError_t LaunchKernelABC();
+	cudaError_t LaunchKernelStepMode();
 	void SetBackendError(const char* fmt, ...);
 	bool Start();
 	void Release();

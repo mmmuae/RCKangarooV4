@@ -30,7 +30,7 @@ typedef char i8;
 #define JMP_CNT				512
 #endif
 
-//can be 8, 16, 24, 32
+//can be 8, 16, 24, 32, 40, 48, 56, 64
 #ifndef PNT_GROUP_NEW_GPU
 #define PNT_GROUP_NEW_GPU	24
 #endif
@@ -113,9 +113,9 @@ struct TKparams
 	u64* Jumps1; //x(32b), y(32b), d(32b)
 	u64* Jumps2; //x(32b), y(32b), d(32b)
 	u64* Jumps3; //x(32b), y(32b), d(32b)
-	u64* JumpsList; //list of all performed jumps, grouped by warp(32) every 8 groups (from PNT_GROUP_CNT). Each jump is 2 bytes: 10bit jump index + flags: INV_FLAG, DP_FLAG, JMP2_FLAG
+	u64* JumpsList; //legacy KernelA/KernelB path only
 	u32* DPTable;
-	u32* L1S2;
+	u64* L1S2;
 	u64* LastPnts;
 	u64* LoopTable;
 	u32* dbg_buf;
@@ -124,6 +124,7 @@ struct TKparams
 
 	u32 KernelA_LDS_Size;
 	u32 KernelB_LDS_Size;
-	u32 KernelC_LDS_Size;	
+	u32 KernelStep_LDS_Size;
+	u32 KernelC_LDS_Size;
 };
 
