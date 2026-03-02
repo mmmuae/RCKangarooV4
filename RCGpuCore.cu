@@ -723,6 +723,8 @@ __device__ __forceinline__ void KernelReplayBody(const TKparams Kparams)
 template<u32 RUN_MODE>
 __device__ __forceinline__ bool ProcessFusedDistanceAndLoop(
 	const TKparams& Kparams,
+	const u64* jmp1_d,
+	const u64* jmp2_d,
 	u32 step_ind,
 	u16 jmp_flags,
 	u32 kang_ind,
@@ -737,8 +739,7 @@ __device__ __forceinline__ bool ProcessFusedDistanceAndLoop(
 	d[1] = *d1_ptr;
 	d[2] = *d2_ptr;
 
-	const u64* jmp_tbl = (jmp_flags & JMP2_FLAG) ? Kparams.Jumps2 : Kparams.Jumps1;
-	const u64* jmp_d = jmp_tbl + (u64)(jmp_flags & JMP_MASK) * 12 + 8;
+	const u64* jmp_d = ((jmp_flags & JMP2_FLAG) ? jmp2_d : jmp1_d) + (u64)(jmp_flags & JMP_MASK) * 4;
 	__align__(16) u64 jmp[3];
 	jmp[0] = jmp_d[0];
 	jmp[1] = jmp_d[1];
@@ -806,6 +807,8 @@ __device__ __forceinline__ void KernelStepBodyFused(const TKparams Kparams)
 	u64* y_last0 = x_last0 + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
 
 	u64* jmp1_table = LDS;
+	u64* jmp1_d = jmp1_table + 8 * JMP_CNT;
+	u64* jmp2_d = jmp1_d + 4 * JMP_CNT;
 	int i = THREAD_X;
 	while (i < JMP_CNT)
 	{
@@ -813,6 +816,12 @@ __device__ __forceinline__ void KernelStepBodyFused(const TKparams Kparams)
 		*(int4*)&jmp1_table[8 * i + 2] = *(int4*)&Kparams.Jumps1[12 * i + 2];
 		*(int4*)&jmp1_table[8 * i + 4] = *(int4*)&Kparams.Jumps1[12 * i + 4];
 		*(int4*)&jmp1_table[8 * i + 6] = *(int4*)&Kparams.Jumps1[12 * i + 6];
+		jmp1_d[4 * i + 0] = Kparams.Jumps1[12 * i + 8];
+		jmp1_d[4 * i + 1] = Kparams.Jumps1[12 * i + 9];
+		jmp1_d[4 * i + 2] = Kparams.Jumps1[12 * i + 10];
+		jmp2_d[4 * i + 0] = Kparams.Jumps2[12 * i + 8];
+		jmp2_d[4 * i + 1] = Kparams.Jumps2[12 * i + 9];
+		jmp2_d[4 * i + 2] = Kparams.Jumps2[12 * i + 10];
 		i += BLOCK_SIZE;
 	}
 	__syncthreads();
@@ -938,6 +947,8 @@ __device__ __forceinline__ void KernelStepBodyFused(const TKparams Kparams)
 				u64 didx = dist_base + (u64)group * dist_stride;
 				if (ProcessFusedDistanceAndLoop<RUN_MODE>(
 					Kparams,
+					jmp1_d,
+					jmp2_d,
 					step_ind,
 					d_cur,
 					kang_ind,
