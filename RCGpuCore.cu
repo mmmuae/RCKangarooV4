@@ -757,23 +757,17 @@ __device__ __forceinline__ bool ProcessFusedDistanceAndLoop(
 	const u32 iter = step_ind % MD_LEN;
 	const u64 table_stride = (u64)Kparams.KangCnt;
 	u64* table = Kparams.LoopTable + kang_linear;
-	int found_ind = (int)iter + MD_LEN - 4;
-	while (1)
-	{
-		if (table[(u64)(found_ind % MD_LEN) * table_stride] == d[0])
-			break;
-		found_ind -= 2;
-		if (table[(u64)(found_ind % MD_LEN) * table_stride] == d[0])
-			break;
-		found_ind -= 2;
-		if (table[(u64)(found_ind % MD_LEN) * table_stride] == d[0])
-			break;
-		found_ind = (int)iter;
-		if (table[(u64)found_ind * table_stride] == d[0])
-			break;
-		found_ind = -1;
-		break;
-	}
+	u32 i0 = iter + MD_LEN - 4;
+	if (i0 >= MD_LEN) i0 -= MD_LEN;
+	u32 i1 = i0 + MD_LEN - 2;
+	if (i1 >= MD_LEN) i1 -= MD_LEN;
+	u32 i2 = i1 + MD_LEN - 2;
+	if (i2 >= MD_LEN) i2 -= MD_LEN;
+	int found_ind = -1;
+	if (table[(u64)i0 * table_stride] == d[0]) found_ind = (int)i0;
+	else if (table[(u64)i1 * table_stride] == d[0]) found_ind = (int)i1;
+	else if (table[(u64)i2 * table_stride] == d[0]) found_ind = (int)i2;
+	else if (table[(u64)iter * table_stride] == d[0]) found_ind = (int)iter;
 	table[(u64)iter * table_stride] = d[0];
 
 	if (found_ind < 0)
